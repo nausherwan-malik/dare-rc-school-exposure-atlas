@@ -115,7 +115,7 @@ def school_profile(frame: pd.DataFrame, key: str) -> None:
         }]),
         hide_index=True,
         column_config={
-            "Students per classroom": st.column_config.NumberColumn(format="%.1f"),
+            "Students per classroom": st.column_config.NumberColumn(format="%d"),
             "Students per functional toilet": st.column_config.NumberColumn(format="%.1f"),
             "Selected visit date": st.column_config.DateColumn(format="DD MMM YYYY"),
         },
@@ -226,7 +226,9 @@ with tab_cumulative:
     display_columns = ["emis_code", "school_name", "district", "tehsil", "total_heatwave_days", "total_heatwave_events",
                        "monitoring_date_used", "monitoring_visit_status", "students_per_classroom", "students_per_functional_toilet",
                        "essential_service_capacity", "vulnerability_priority", "data_quality_flag"]
-    st.dataframe(cum[display_columns], hide_index=True, height=420)
+    st.dataframe(cum[display_columns], hide_index=True, height=420, column_config={
+        "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
+    })
     st.download_button("Download filtered cumulative data", cum.to_csv(index=False).encode("utf-8"),
         "filtered_cumulative_school_vulnerability.csv", "text/csv")
 
@@ -278,7 +280,9 @@ with tab_annual:
     display_columns = ["emis_code", "school_name", "district", "tehsil", "event_year", "total_heatwave_days_year",
                        "selected_event_code", "monitoring_date_used", "days_from_selected_event_start", "total_enrolment",
                        "students_per_classroom", "students_per_functional_toilet", "essential_service_capacity", "data_quality_flag"]
-    st.dataframe(annual[display_columns], hide_index=True, height=420)
+    st.dataframe(annual[display_columns], hide_index=True, height=420, column_config={
+        "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
+    })
     st.download_button("Download filtered school-year data", annual.to_csv(index=False).encode("utf-8"),
         f"filtered_school_year_heatwave_capacity_{selected_year}.csv", "text/csv")
 
