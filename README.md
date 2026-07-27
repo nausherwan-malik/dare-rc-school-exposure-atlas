@@ -5,7 +5,7 @@
 ## Run the dashboard
 
 ```bash
-pip install -r requirements-analytics.txt
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
