@@ -83,7 +83,7 @@ def priority_map(frame: pd.DataFrame) -> pdk.Deck:
     )
 
 
-def school_profile(frame: pd.DataFrame, key: str) -> None:
+def school_profile(frame: pd.DataFrame, yearly_frame: pd.DataFrame, key: str) -> None:
     if frame.empty:
         st.warning("No schools match the current filters.", icon=":material/filter_alt_off:")
         return
@@ -101,7 +101,6 @@ def school_profile(frame: pd.DataFrame, key: str) -> None:
         st.metric("Heatwave days", f"{school['total_heatwave_days']:.0f}", border=True)
         st.metric("Capacity", school["essential_service_capacity"], border=True)
         st.metric("Selected visit date", visit_date, border=True)
-    st.caption(f"Monitoring status: {school['monitoring_visit_status']}")
     st.dataframe(
         pd.DataFrame([{
             "Enrolment": school["total_enrolment"],
@@ -110,7 +109,6 @@ def school_profile(frame: pd.DataFrame, key: str) -> None:
             "Electricity": school["electricity_status"],
             "Water": school["water_status"],
             "Selected visit date": school["monitoring_date_used"],
-            "Monitoring status": school["monitoring_visit_status"],
             "Data quality": school["data_quality_flag"],
         }]),
         hide_index=True,
@@ -118,6 +116,30 @@ def school_profile(frame: pd.DataFrame, key: str) -> None:
             "Students per classroom": st.column_config.NumberColumn(format="%d"),
             "Students per functional toilet": st.column_config.NumberColumn(format="%.1f"),
             "Selected visit date": st.column_config.DateColumn(format="DD MMM YYYY"),
+        },
+    )
+    st.subheader("Heatwave-year monitoring history")
+    st.caption("One selected monitoring visit per heatwave year. A blank monitoring date means there was no PMIU visit in that year.")
+    history = yearly_frame[yearly_frame["emis_code"].astype(str) == str(school["emis_code"])].sort_values("event_year")
+    history_columns = [
+        "event_year", "selected_event_code", "selected_event_start_date", "selected_event_heatwave_days",
+        "monitoring_date_used", "days_from_selected_event_start", "total_enrolment", "students_per_classroom",
+        "functional_toilets", "electricity_status", "water_status", "essential_service_capacity", "data_quality_flag",
+    ]
+    st.dataframe(
+        history[history_columns], hide_index=True,
+        column_config={
+            "event_year": st.column_config.NumberColumn("Heatwave year", format="%d"),
+            "selected_event_code": "Selected heatwave event",
+            "selected_event_start_date": st.column_config.DateColumn("Event start", format="DD MMM YYYY"),
+            "selected_event_heatwave_days": st.column_config.NumberColumn("Event heatwave days", format="%.0f"),
+            "monitoring_date_used": st.column_config.DateColumn("Selected monitoring date", format="DD MMM YYYY"),
+            "days_from_selected_event_start": st.column_config.NumberColumn("Days from event start", format="%d"),
+            "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"),
+            "students_per_classroom": st.column_config.NumberColumn("Students per classroom", format="%d"),
+            "functional_toilets": st.column_config.NumberColumn("Functional toilets", format="%.0f"),
+            "essential_service_capacity": "Service capacity",
+            "data_quality_flag": "Data quality",
         },
     )
 
@@ -287,8 +309,8 @@ with tab_annual:
         f"filtered_school_year_heatwave_capacity_{selected_year}.csv", "text/csv")
 
 with tab_profile:
-    st.caption("Service and infrastructure values are from the single PMIU visit selected nearest to a relevant heatwave.")
-    school_profile(cum, "school_profile")
+    st.caption("Service and infrastructure values come from the selected monitoring visit nearest to a heatwave in the same year.")
+    school_profile(cum, yearly, "school_profile")
 
 with tab_notes:
     st.subheader("How to read this dashboard")
