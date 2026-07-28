@@ -180,6 +180,8 @@ with tab_overview:
     st.subheader("Priority schools at a glance")
     st.caption("Point colour represents vulnerability priority. Hover for a school summary; use the school profile tab for full details.")
     st.pydeck_chart(priority_map(cum), height=520, on_select="rerun", selection_mode="single-object", key="priority_map")
+    st.caption("Map legend")
+    st.markdown(":red-badge[Priority 1] :orange-badge[Priority 2] :yellow-badge[Priority 3] :blue-badge[Priority 4] :gray-badge[Priority 5] :gray-badge[Unclassified / no heatwave-year visit]")
 
     shortlist = cum.assign(
         _priority_order=cum["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
