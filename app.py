@@ -11,10 +11,26 @@ import streamlit as st
 ROOT = Path(__file__).parent
 CUMULATIVE_FILE = ROOT / "final_school_heatwave_vulnerability_nearest_event.csv"
 YEARLY_FILE = ROOT / "school_year_heatwave_capacity.csv"
+PRIORITY_OPTIONS = [
+    "Priority 1",
+    "Priority 2",
+    "Priority 3",
+    "Priority 4",
+    "Priority 5",
+    "Unclassified - PMIU missing",
+]
+PRIORITY_LABELS = {
+    "Priority 1": "🔴 Priority 1",
+    "Priority 2": "🟠 Priority 2",
+    "Priority 3": "🟡 Priority 3",
+    "Priority 4": "🔵 Priority 4",
+    "Priority 5": "⚪ Priority 5",
+    "Unclassified - PMIU missing": "⚫ Unclassified",
+}
 
 st.set_page_config(
-    page_title="Punjab Heatwave Intelligence",
-    page_icon=":material/wb_sunny:",
+    page_title="School Exposure Atlas",
+    page_icon=":material/map:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -151,7 +167,7 @@ if not CUMULATIVE_FILE.exists() or not YEARLY_FILE.exists():
 cumulative = load_cumulative()
 yearly = load_yearly()
 
-st.title(":material/wb_sunny: Punjab heatwave intelligence")
+st.title(":material/map: School exposure atlas")
 st.caption("A decision view of cumulative school vulnerability and monitoring visits selected only from a school’s heatwave year, 2021–2026.")
 
 st.sidebar.header(":material/tune: Filters")
@@ -178,10 +194,18 @@ with tab_overview:
         st.metric("Schools in selection", f"{len(cum):,}", border=True)
 
     st.subheader("Priority schools at a glance")
-    st.caption("Point colour represents vulnerability priority. Hover for a school summary; use the school profile tab for full details.")
-    st.pydeck_chart(priority_map(cum), height=520, on_select="rerun", selection_mode="single-object", key="priority_map")
-    st.caption("Map legend")
-    st.markdown(":red-badge[Priority 1] :orange-badge[Priority 2] :yellow-badge[Priority 3] :blue-badge[Priority 4] :gray-badge[Priority 5] :gray-badge[Unclassified / no heatwave-year visit]")
+    st.caption("Select one or more priorities to filter the map. No selection shows all schools; hover over a point for details.")
+    map_counts = cum["vulnerability_priority"].value_counts()
+    map_priorities = st.pills(
+        "Map priority legend",
+        PRIORITY_OPTIONS,
+        selection_mode="multi",
+        format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({map_counts.get(priority, 0):,})",
+        key="map_priority_filter",
+    )
+    map_schools = cum[cum["vulnerability_priority"].isin(map_priorities)] if map_priorities else cum
+    st.pydeck_chart(priority_map(map_schools), height=520, key="priority_map")
+    st.caption(f"Showing {len(map_schools):,} schools on the map.")
 
     shortlist = cum.assign(
         _priority_order=cum["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
@@ -201,9 +225,14 @@ with tab_overview:
         )
 
 with tab_cumulative:
-    priorities = st.multiselect(
-        "Vulnerability priority", sorted(cum["vulnerability_priority"].dropna().unique()),
-        default=[], help="Leave empty to include every priority category."
+    cumulative_counts = cum["vulnerability_priority"].value_counts()
+    priorities = st.pills(
+        "Filter cumulative view by priority",
+        PRIORITY_OPTIONS,
+        selection_mode="multi",
+        format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({cumulative_counts.get(priority, 0):,})",
+        key="cumulative_priority_filter",
+        help="Select one or more priorities. No selection includes every category.",
     )
     if priorities:
         cum = cum[cum["vulnerability_priority"].isin(priorities)]
@@ -218,9 +247,9 @@ with tab_cumulative:
 
     left, right = st.columns(2)
     with left:
-        priority_order = ["Priority 1", "Priority 2", "Priority 3", "Priority 4", "Unclassified"]
-        priority = cum["vulnerability_priority"].fillna("Unclassified").value_counts().reindex(priority_order, fill_value=0)
+        priority = cum["vulnerability_priority"].fillna("Unclassified - PMIU missing").value_counts().reindex(PRIORITY_OPTIONS, fill_value=0)
         priority = priority.rename_axis("priority").reset_index(name="schools")
+        priority["priority"] = priority["priority"].replace({"Unclassified - PMIU missing": "Unclassified"})
         st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
             title="Schools by vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
             .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
