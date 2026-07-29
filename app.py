@@ -344,13 +344,68 @@ with tab_profile:
     school_profile(cum, yearly, "school_profile")
 
 with tab_notes:
-    st.subheader("How to read this dashboard")
-    st.markdown("""
-    **Cumulative view** has one row per exposed Punjab school. It combines exposure across 2021–2026 and attaches the closest PMIU monitoring visit only when it occurred in one of that school’s heatwave years. Older or later visits are not used.
+    st.subheader("Dashboard guide")
+    st.dataframe(
+        pd.DataFrame([
+            ["Sidebar filters", "District and school level", "Filters both cumulative and school-year results."],
+            ["Decision view: headline metrics", "Counts of exposed, high-exposure, urgent, and unmatched schools", "A quick summary of the current district and level selection."],
+            ["Decision view: priority map", "School locations coloured by vulnerability priority", "Use the priority pills to show one or several categories; hover for school details."],
+            ["Decision view: shortlist", "First 100 schools ordered by priority category and rank", "Use as a review or targeting list, not as a causal-impact ranking."],
+            ["Cumulative view", "One row per exposed school; heatwave exposure summed across 2021–2026", "Capacity comes from the closest eligible PMIU visit in one of that school's heatwave years."],
+            ["Cumulative: classroom pressure", "Priority 1–3 schools with the most students per usable classroom", "Highlights schools where heat exposure and observed classroom pressure overlap."],
+            ["School-year view", "One row per school and heatwave year", "Uses one PMIU visit: the visit closest to a heatwave in that same year."],
+            ["School-year: priority ranking", "Top 20 schools for exposure, classroom pressure, or toilet pressure", "Switch the measure to review different operational pressures."],
+            ["School profile: summary", "Cumulative exposure and selected school-capacity indicators", "Describes the chosen school using the cumulative output."],
+            ["School profile: visit history", "One selected monitoring visit for every exposed heatwave year", "A blank date means no PMIU visit was available in that year."],
+            ["Method", "Definitions, matching rules, and priority construction", "Use this section when interpreting or reporting dashboard results."],
+        ], columns=["Tab / section", "What it shows", "How to use it"]),
+        hide_index=True,
+        height="content",
+    )
 
-    **School-year view** has one row per school and heatwave year. It uses the PMIU visit closest to a heatwave in that same year. A school may appear in several years.
+    st.subheader("How priorities are set")
+    st.caption("Priority is determined in three steps using the full cumulative school dataset, before dashboard filters are applied.")
 
-    **Priority ranking** is the analysis output’s existing vulnerability priority. It should guide review and targeting; it is not a causal impact estimate.
+    st.markdown("**1. Cumulative heatwave exposure class**")
+    st.dataframe(
+        pd.DataFrame([
+            ["Low", "14–34 cumulative heatwave days", "At or below the 33rd percentile"],
+            ["Moderate", "35–38 cumulative heatwave days", "Between the 33rd and 67th percentiles"],
+            ["High", "39–48 cumulative heatwave days", "Above the 67th percentile"],
+        ], columns=["Exposure class", "Current-data range", "Rule"]),
+        hide_index=True,
+        height="content",
+    )
 
-    `monitoring_visit_status` explicitly identifies schools with no visit in a heatwave year. `data_quality_flag` gives further detail. Service-capacity and vulnerability fields depend on the selected visit, so they describe conditions observed at that point in time rather than a cumulative physical condition.
-    """)
+    st.markdown("**2. Essential-service capacity from the selected PMIU visit**")
+    st.dataframe(
+        pd.DataFrame([
+            ["Adequate", "Electricity and drinking water are both available, functional, and wholly provided."],
+            ["Weak", "Electricity and drinking water are both unavailable or non-functional."],
+            ["Partial", "Any other observed combination, including one adequate service and one weak/partial service."],
+            ["Missing", "No eligible heatwave-year visit, or electricity/water availability or functionality is missing."],
+        ], columns=["Capacity class", "Rule"]),
+        hide_index=True,
+        height="content",
+    )
+
+    method_priority_counts = cumulative["vulnerability_priority"].value_counts()
+    st.markdown("**3. Vulnerability priority**")
+    st.dataframe(
+        pd.DataFrame([
+            ["Priority 1", "High", "Weak", int(method_priority_counts.get("Priority 1", 0))],
+            ["Priority 2", "High", "Partial", int(method_priority_counts.get("Priority 2", 0))],
+            ["Priority 3", "High", "Adequate", int(method_priority_counts.get("Priority 3", 0))],
+            ["Priority 4", "Low or moderate", "Weak or partial", int(method_priority_counts.get("Priority 4", 0))],
+            ["Priority 5", "Low or moderate", "Adequate", int(method_priority_counts.get("Priority 5", 0))],
+            ["Unclassified", "Any", "Missing", int(method_priority_counts.get("Unclassified - PMIU missing", 0))],
+        ], columns=["Priority", "Exposure class", "Essential-service capacity", "Current schools"]),
+        hide_index=True,
+        height="content",
+        column_config={"Current schools": st.column_config.NumberColumn(format="%d")},
+    )
+
+    st.caption(
+        "Priority rank orders schools within each priority category by cumulative heatwave days, then EMIS code. "
+        "Priority supports review and targeting; it is not a causal estimate. Facility status describes the selected visit, not a cumulative physical condition."
+    )
