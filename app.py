@@ -410,6 +410,12 @@ with tab_rainfall:
         "Exposure class on map", exposure_classes, selection_mode="multi", key="rainfall_map_exposure_class",
         help="Select one or more classes. No selection shows all schools.",
     )
+    st.caption("Map legend — colours show cumulative rainfall exposure; the pills above filter the displayed points.")
+    with st.container(horizontal=True, gap="small"):
+        st.badge("High · above the 67th percentile", icon=":material/circle:", color="red")
+        st.badge("Moderate · 33rd–67th percentile", icon=":material/circle:", color="orange")
+        st.badge("Low · at or below the 33rd percentile", icon=":material/circle:", color="yellow")
+        st.badge("No recorded exposure", icon=":material/circle:", color="gray")
     rainfall_map_schools = rain[rain["exposure_class"].isin(selected_classes)] if selected_classes else rain
     st.pydeck_chart(rainfall_exposure_map(rainfall_map_schools), height=520, key="rainfall_exposure_map")
     st.caption(f"Showing {len(rainfall_map_schools):,} schools. High, moderate and low classes use percentile cut-offs among schools exposed at least once.")
