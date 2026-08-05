@@ -12,6 +12,8 @@
 !punjab_school_rainfall_exposure_clean.csv
 !punjab_rainfall_event_summary.csv
 !punjab_rainfall_event_disaggregation.csv
+!final_school_rainfall_vulnerability_nearest_event.csv
+!school_year_rainfall_capacity.csv
 
 # Never publish credentials.
 .streamlit/secrets.toml

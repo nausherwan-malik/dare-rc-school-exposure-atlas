@@ -14,6 +14,14 @@ YEARLY_FILE = ROOT / "school_year_heatwave_capacity.csv"
 RAINFALL_SCHOOLS_FILE = ROOT / "punjab_school_rainfall_exposure_clean.csv"
 RAINFALL_EVENTS_FILE = ROOT / "punjab_rainfall_event_summary.csv"
 RAINFALL_EVENT_GROUPS_FILE = ROOT / "punjab_rainfall_event_disaggregation.csv"
+RAINFALL_CUMULATIVE_FILE = ROOT / "final_school_rainfall_vulnerability_nearest_event.csv"
+RAINFALL_YEARLY_FILE = ROOT / "school_year_rainfall_capacity.csv"
+RAINFALL_CAPACITY_DIMENSIONS = {
+    "structural_condition_status": "Structural condition (building cleanliness)",
+    "learning_space_status": "Learning-space continuity (classrooms)",
+    "sanitation_status": "Sanitation (toilets)",
+    "safe_water_status": "Safe water",
+}
 PRIORITY_OPTIONS = [
     "Priority 1",
     "Priority 2",
@@ -30,6 +38,9 @@ PRIORITY_LABELS = {
     "Priority 5": "⚪ Priority 5",
     "Unclassified - PMIU missing": "⚫ Unclassified",
 }
+RAINFALL_PRIORITY_OPTIONS = PRIORITY_OPTIONS[:5] + ["Unclassified - capacity data missing"]
+RAINFALL_PRIORITY_LABELS = {**{k: v for k, v in PRIORITY_LABELS.items() if k != "Unclassified - PMIU missing"},
+                             "Unclassified - capacity data missing": "⚫ Unclassified"}
 
 st.set_page_config(
     page_title="School Exposure Atlas",
@@ -61,6 +72,19 @@ def load_rainfall_events() -> tuple[pd.DataFrame, pd.DataFrame]:
     events = pd.read_csv(RAINFALL_EVENTS_FILE, parse_dates=["event_start_date", "event_end_date"])
     groups = pd.read_csv(RAINFALL_EVENT_GROUPS_FILE, parse_dates=["event_start_date", "event_end_date"])
     return events, groups
+
+
+@st.cache_data(show_spinner="Loading rainfall coping-capacity data…")
+def load_rainfall_cumulative() -> pd.DataFrame:
+    return pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
+
+
+@st.cache_data(show_spinner="Loading rainfall-year monitoring data…")
+def load_rainfall_yearly() -> pd.DataFrame:
+    frame = pd.read_csv(RAINFALL_YEARLY_FILE, dtype={"emis_code": "string"}, low_memory=False)
+    for column in ("selected_event_start_date", "selected_event_end_date", "monitoring_date_used"):
+        frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    return frame
 
 
 def select_values(label: str, values: pd.Series, key: str) -> list[str]:
@@ -101,6 +125,30 @@ def priority_map(frame: pd.DataFrame) -> pdk.Deck:
     }
     map_data["map_color"] = map_data["vulnerability_priority"].map(colors).apply(
         lambda value: value if isinstance(value, list) else [150, 150, 150, 60]
+    )
+
+
+def rainfall_priority_map(frame: pd.DataFrame) -> pdk.Deck:
+    map_data = frame.dropna(subset=["latitude", "longitude"]).copy()
+    colors = {
+        "Priority 1": [153, 27, 27, 210],
+        "Priority 2": [220, 72, 39, 190],
+        "Priority 3": [245, 158, 11, 130],
+        "Priority 4": [45, 125, 210, 100],
+        "Priority 5": [87, 125, 155, 55],
+    }
+    map_data["map_color"] = map_data["vulnerability_priority"].map(colors).apply(
+        lambda value: value if isinstance(value, list) else [150, 150, 150, 60]
+    )
+    return pdk.Deck(
+        map_style=None,
+        initial_view_state=pdk.ViewState(latitude=30.5, longitude=71.5, zoom=6.2, pitch=20),
+        layers=[pdk.Layer(
+            "ScatterplotLayer", id="rainfall_priority_schools", data=map_data, get_position="[longitude, latitude]",
+            get_fill_color="map_color", get_radius=450, radius_min_pixels=2, radius_max_pixels=10,
+            pickable=True,
+        )],
+        tooltip={"html": "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>Exposure: {exposure_class} · Capacity: {rainfall_coping_capacity}"},
     )
 
 
@@ -198,7 +246,10 @@ def school_profile(frame: pd.DataFrame, yearly_frame: pd.DataFrame, key: str) ->
     )
 
 
-REQUIRED_FILES = [CUMULATIVE_FILE, YEARLY_FILE, RAINFALL_SCHOOLS_FILE, RAINFALL_EVENTS_FILE, RAINFALL_EVENT_GROUPS_FILE]
+REQUIRED_FILES = [
+    CUMULATIVE_FILE, YEARLY_FILE, RAINFALL_SCHOOLS_FILE, RAINFALL_EVENTS_FILE, RAINFALL_EVENT_GROUPS_FILE,
+    RAINFALL_CUMULATIVE_FILE, RAINFALL_YEARLY_FILE,
+]
 if any(not file.exists() for file in REQUIRED_FILES):
     st.error("Required analysis files are missing. Keep this app beside the heatwave and rainfall output CSV files.")
     st.stop()
@@ -207,6 +258,8 @@ cumulative = load_cumulative()
 yearly = load_yearly()
 rainfall_schools = load_rainfall_schools()
 rainfall_events, rainfall_event_groups = load_rainfall_events()
+rainfall_cumulative = load_rainfall_cumulative()
+rainfall_yearly = load_rainfall_yearly()
 
 st.title(":material/map: School exposure atlas")
 st.caption("Punjab school exposure to heatwaves and extreme rainfall, with heatwave-year monitoring context where available.")
@@ -218,6 +271,7 @@ st.sidebar.caption("Filters apply to both views. The annual view also has a year
 
 cum = apply_filters(cumulative, districts, levels)
 annual = apply_filters(yearly, districts, levels)
+rain_cap = apply_filters(rainfall_cumulative, districts, levels)
 
 tab_overview, tab_cumulative, tab_annual, tab_rainfall, tab_profile, tab_notes = st.tabs([
     ":material/dashboard: Decision view", ":material/monitoring: Cumulative view",
@@ -495,8 +549,72 @@ with tab_rainfall:
         "Download filtered rainfall school data", rainfall_table.to_csv(index=False).encode("utf-8"),
         "filtered_punjab_school_rainfall_exposure.csv", "text/csv",
     )
+
+    st.subheader("Rainfall coping-capacity priority")
+    st.caption(
+        "Combines each school's cumulative rainfall exposure with PMIU-visit proxies for structural condition, "
+        "learning-space continuity, sanitation and safe water. Sewerage/drainage is not scored — free-text mentions "
+        "cover under 1% of visits. Uses the PMIU visit closest to one of the school's own extreme-rainfall events, "
+        "matched by calendar year, the same nearest-visit rule used for heatwave."
+    )
+    rain_priority_counts = rain_cap["vulnerability_priority"].value_counts()
+    urgent_rain = rain_cap["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
+    weak_capacity = (rain_cap["rainfall_coping_capacity"] == "Weak").sum()
+    with st.container(horizontal=True):
+        st.metric("Exposed schools with a priority", f"{len(rain_cap):,}", border=True)
+        st.metric("Priority 1–2 schools", f"{urgent_rain:,}", border=True)
+        st.metric("Weak coping capacity", f"{weak_capacity:,}", border=True)
+        st.metric("No PMIU capacity match", f"{rain_priority_counts.get('Unclassified - capacity data missing', 0):,}", border=True)
+
+    rain_priorities = st.pills(
+        "Map priority legend",
+        RAINFALL_PRIORITY_OPTIONS,
+        selection_mode="multi",
+        format_func=lambda priority: f"{RAINFALL_PRIORITY_LABELS[priority]} ({rain_priority_counts.get(priority, 0):,})",
+        key="rainfall_priority_map_filter",
+    )
+    rain_map_schools = rain_cap[rain_cap["vulnerability_priority"].isin(rain_priorities)] if rain_priorities else rain_cap
+    st.pydeck_chart(rainfall_priority_map(rain_map_schools), height=520, key="rainfall_priority_map")
+    st.caption(f"Showing {len(rain_map_schools):,} exposed schools on the map.")
+
+    left, right = st.columns(2)
+    with left:
+        priority = rain_cap["vulnerability_priority"].fillna("Unclassified - capacity data missing").value_counts().reindex(
+            RAINFALL_PRIORITY_OPTIONS, fill_value=0
+        ).rename_axis("priority").reset_index(name="schools")
+        st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
+            title="Exposed schools by rainfall vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
+            .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
+    with right:
+        dimension_choice = st.selectbox("Capacity dimension", list(RAINFALL_CAPACITY_DIMENSIONS.values()), key="rainfall_capacity_dimension")
+        dimension_column = next(key for key, label in RAINFALL_CAPACITY_DIMENSIONS.items() if label == dimension_choice)
+        st.plotly_chart(capacity_chart(rain_cap, dimension_column, dimension_choice), width="stretch")
+
+    rain_shortlist = rain_cap.assign(
+        _priority_order=rain_cap["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
+    ).sort_values(["_priority_order", "priority_rank", "rainfall_exposure_score"], ascending=[True, True, False]).head(100)
+    with st.container(border=True):
+        st.subheader("Priority school shortlist")
+        st.caption("The first 100 exposed schools after applying the current filters, ordered by priority category and rank.")
+        st.dataframe(
+            rain_shortlist[["priority_rank", "school_name", "district", "tehsil", "exposure_class", "rainfall_coping_capacity",
+                             "cumulative_extreme_days", "monitoring_date_used", "monitoring_visit_status"]],
+            hide_index=True, height=360,
+            column_config={
+                "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
+                "cumulative_extreme_days": st.column_config.NumberColumn("Extreme-rainfall days", format="%.0f"),
+                "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
+                "monitoring_visit_status": "Monitoring status",
+                "rainfall_coping_capacity": "Coping capacity",
+            },
+        )
+    st.download_button(
+        "Download rainfall vulnerability priority data", rain_cap.to_csv(index=False).encode("utf-8"),
+        "filtered_school_rainfall_vulnerability_priority.csv", "text/csv",
+    )
     st.info(
-        "Rainfall coping-capacity priority and rainfall-enrolment disruption are not yet calculated. They require the latest ASC/SIS capacity extract and a monthly enrolment panel, respectively.",
+        "Rainfall-enrolment disruption is not yet estimated here. It requires an event-study design over the "
+        "monthly enrolment panel, matching exposed and unexposed schools around each event.",
         icon=":material/info:",
     )
 
@@ -521,7 +639,7 @@ with tab_notes:
                 ["Cumulative: classroom pressure", "Priority 1–3 schools with the most students per usable classroom", "Highlights schools where heat exposure and observed classroom pressure overlap."],
                 ["School-year view", "One row per school and heatwave year", "Uses one PMIU visit: the visit closest to a heatwave in that same year."],
                 ["School-year: priority ranking", "Top 20 schools for exposure, classroom pressure, or toilet pressure", "Switch the measure to review different operational pressures."],
-                ["Rainfall exposure", "Punjab exposure across 46 extreme-rainfall events, 2021–2025", "Use the event selector for timing and the chart for school-level and gender composition."],
+                ["Rainfall exposure", "Punjab exposure across 46 extreme-rainfall events, 2021–2025, plus rainfall vulnerability priority", "Use the event selector for timing and composition; use the priority section for PMIU-linked coping capacity and targeting."],
                 ["School profile: summary", "Cumulative exposure and selected school-capacity indicators", "Describes the chosen school using the cumulative output."],
                 ["School profile: visit history", "One selected monitoring visit for every exposed heatwave year", "A blank date means no PMIU visit was available in that year."],
                 ["Method", "Definitions, matching rules, and priority construction", "Use this section when interpreting or reporting dashboard results."],
@@ -542,7 +660,7 @@ with tab_notes:
             pd.DataFrame([
                 ["Policy Question 1", "Where and when schools are exposed, and the affected school/enrolment counts", "Heatwave and rainfall exposure views support this for Punjab; rainfall is disaggregated by school level and gender."],
                 ["Policy Question 2", "Whether climate events cause enrolment disruption, recovery or persistent decline", "Not yet estimated. This requires a monthly enrolment panel and an exposed-versus-unexposed event-study design."],
-                ["Risk prioritisation", "Which exposed schools also have weak capacity", "Available for heatwave only. Rainfall priority awaits the ASC/SIS capacity extract."],
+                ["Risk prioritisation", "Which exposed schools also have weak capacity", "Available for heatwave and rainfall. Rainfall capacity uses PMIU-visit proxies (cleanliness, classrooms, toilets, water); no ASC/SIS structural or drainage extract was available, so drainage is excluded."],
             ], columns=["Question", "Dashboard coverage", "Current status"]),
             hide_index=True,
             height=214,
@@ -612,5 +730,75 @@ with tab_notes:
         st.info(
             "Priority rank orders schools within each category by cumulative heatwave days, then EMIS code. "
             "It supports review and targeting; it is not a causal estimate. Facility status describes the selected visit, not a cumulative physical condition.",
+            icon=":material/info:",
+        )
+
+    with st.container(border=True):
+        st.markdown("#### :material/water_drop: How rainfall priorities are set")
+        st.caption(
+            "Rainfall priority follows the same two-step exposure-then-capacity logic as heatwave, using proxies from PMIU "
+            "visits instead of an ASC/SIS capacity extract. Only exposed schools (events_exposed_count > 0) receive a priority."
+        )
+
+        rain_exposure_step, rain_capacity_step = st.columns([1, 1.6], gap="large")
+        with rain_exposure_step:
+            st.badge("Step 1 · Exposure", icon=":material/water_drop:", color="blue")
+            st.markdown("**Cumulative rainfall exposure**")
+            st.caption("Composite of event frequency, intensity and persistence — see the rainfall exposure tab legend.")
+            st.dataframe(
+                pd.DataFrame([
+                    ["Low", "At or below the 33rd percentile among exposed schools"],
+                    ["Moderate", "Between the 33rd and 67th percentiles"],
+                    ["High", "Above the 67th percentile"],
+                ], columns=["Class", "Rule"]),
+                hide_index=True,
+                height=145,
+                row_height=48,
+            )
+
+        with rain_capacity_step:
+            st.badge("Step 2 · Coping capacity", icon=":material/handyman:", color="orange")
+            st.markdown("**Four PMIU-visit proxies, scored at the visit closest to one of the school's exposed rainfall years**")
+            st.dataframe(
+                pd.DataFrame([
+                    ["Structural condition", "Building cleanliness status", "96.3%", "Adequate = good; Partial = average; Weak = poor."],
+                    ["Learning-space continuity", "Classrooms used for teaching ÷ total classrooms", "99.8%", "Adequate ≥90%; Partial 70–<90%; Weak <70%."],
+                    ["Sanitation", "Functional toilets ÷ total toilets", "99.8%", "Adequate ≥90%; Partial 50–<90%; Weak <50% or none functional."],
+                    ["Safe water", "Availability, functionality and extent", "96.2%", "Adequate = available, functional and wholly provided; Weak = unavailable or non-functional."],
+                    ["Drainage/sewerage", "Only free-text mentions", "0.04%", "Not usable — excluded from the capacity score."],
+                ], columns=["Dimension", "Proxy", "PMIU coverage", "Rule"]),
+                hide_index=True,
+                height=214,
+                row_height=44,
+                column_config={"Dimension": st.column_config.TextColumn(width="medium")},
+            )
+            st.caption("Each of the four scored dimensions contributes Adequate = 2, Partial = 1, Weak = 0 to a 0–8 capacity score.")
+
+        rain_priority_counts = rainfall_cumulative["vulnerability_priority"].value_counts()
+        st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
+        st.markdown("**Combine exposure and coping capacity**")
+        st.dataframe(
+            pd.DataFrame([
+                [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(rain_priority_counts.get("Priority 1", 0))],
+                [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(rain_priority_counts.get("Priority 2", 0))],
+                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(rain_priority_counts.get("Priority 3", 0))],
+                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(rain_priority_counts.get("Priority 4", 0))],
+                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(rain_priority_counts.get("Priority 5", 0))],
+                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(rain_priority_counts.get("Unclassified - capacity data missing", 0))],
+            ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
+            hide_index=True,
+            height=312,
+            row_height=44,
+            column_config={
+                "Priority": st.column_config.TextColumn(width="medium"),
+                "Schools": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+
+        st.info(
+            "Priority rank orders schools within each category by rainfall exposure score, then EMIS code. It supports review "
+            "and targeting, not a causal estimate. Schools never exposed to an extreme-rainfall event are excluded from "
+            "priority, not scored as low-risk. No damage-severity modifier is applied, unlike the original methodology brief, "
+            "because a reported rain/flood damage field was not available in the PMIU visit data used here.",
             icon=":material/info:",
         )
