@@ -1,5 +1,6 @@
 """Punjab school climate-risk dashboard."""
 
+import html as html_lib
 from pathlib import Path
 
 import pandas as pd
@@ -83,6 +84,106 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+APP_CSS = """
+<style>
+:root {
+    --dare-ink: #102a43;
+    --dare-border: #d7e0ea;
+    --dare-panel: #eef2f7;
+    --dare-accent: #c2410c;
+    --dare-accent-soft: #fdece3;
+}
+
+/* Hero title block */
+h1 {
+    letter-spacing: -0.02em;
+}
+
+/* Section nav (segmented control) reads as a tab strip, sticky under the header */
+div[data-testid="stSegmentedControl"] {
+    position: sticky;
+    top: 0.25rem;
+    z-index: 999;
+    background: rgba(248, 250, 252, 0.92);
+    backdrop-filter: blur(6px);
+    padding: 0.35rem 0.1rem;
+    border-radius: 999px;
+    border: 1px solid var(--dare-border);
+    margin-bottom: 0.25rem;
+}
+
+/* Metric cards get a colored top accent and a touch of lift */
+div[data-testid="stMetric"] {
+    border-top: 3px solid var(--dare-accent);
+    border-radius: 0.6rem;
+    padding: 0.65rem 0.9rem 0.5rem 0.9rem;
+    box-shadow: 0 1px 2px rgba(16, 42, 67, 0.06);
+}
+div[data-testid="stMetricValue"] {
+    font-size: 1.55rem;
+}
+
+/* Bordered containers (cards) get a soft shadow instead of a flat rule */
+div[data-testid="stVerticalBlockBorderWrapper"] > div {
+    box-shadow: 0 1px 3px rgba(16, 42, 67, 0.07);
+}
+
+/* Legend / filter pills */
+div[data-testid="stPills"] button, div[data-testid="stSegmentedControl"] button {
+    border-radius: 999px !important;
+}
+
+/* Buttons and downloads: rounder, slightly bolder */
+div[data-testid="stDownloadButton"] button, div[data-testid="stButton"] button {
+    border-radius: 0.6rem;
+    font-weight: 600;
+}
+
+/* Custom wrapping reference tables (st.dataframe can't wrap text — it's canvas-rendered) */
+.dare-table-wrap {
+    overflow-x: auto;
+    margin: 0.15rem 0 0.85rem 0;
+    border: 1px solid var(--dare-border);
+    border-radius: 0.6rem;
+}
+table.dare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    background: white;
+}
+table.dare-table th {
+    text-align: left;
+    background: var(--dare-panel);
+    color: var(--dare-ink);
+    font-weight: 700;
+    padding: 0.6rem 0.85rem;
+    border-bottom: 2px solid var(--dare-border);
+    position: sticky;
+    top: 0;
+}
+table.dare-table td {
+    padding: 0.6rem 0.85rem;
+    border-bottom: 1px solid var(--dare-border);
+    vertical-align: top;
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.4;
+    color: var(--dare-ink);
+}
+table.dare-table tbody tr:last-child td {
+    border-bottom: none;
+}
+table.dare-table tbody tr:nth-child(even) {
+    background: rgba(238, 242, 247, 0.5);
+}
+table.dare-table tbody tr:hover {
+    background: var(--dare-accent-soft);
+}
+</style>
+"""
+st.markdown(APP_CSS, unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner="Loading cumulative school data…")
@@ -246,6 +347,32 @@ def rain_capacity_rules(base_frame: pd.DataFrame) -> pd.DataFrame:
     ], columns=["Dimension", "Proxy", "PMIU coverage", "Rule"])
 
 
+_COLUMN_WIDTH_CSS = {"small": "14%", "medium": "20%", "large": "30%"}
+
+
+def render_table(df: pd.DataFrame, column_widths: dict | None = None) -> None:
+    """Render a reference/explanation table with wrapping text.
+
+    st.dataframe renders cells to a canvas grid and cannot wrap long text no matter
+    the row height — this renders real HTML instead, for tables where the point is to
+    be read, not sorted or scrolled.
+    """
+    widths = column_widths or {}
+    head_cells = "".join(
+        f'<th style="width:{_COLUMN_WIDTH_CSS.get(widths.get(c), widths.get(c, ""))}">{html_lib.escape(str(c))}</th>'
+        for c in df.columns
+    )
+    body_rows = "".join(
+        "<tr>" + "".join(f"<td>{html_lib.escape(str(value))}</td>" for value in row) + "</tr>"
+        for row in df.itertuples(index=False)
+    )
+    st.markdown(
+        f'<div class="dare-table-wrap"><table class="dare-table"><thead><tr>{head_cells}</tr></thead>'
+        f"<tbody>{body_rows}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def legend_pills(options: list[str], labels: dict, counts: pd.Series, key: str, plain: bool = False) -> list[str]:
     """A clickable, multi-select map legend with live counts — used for every map in the app."""
     def fmt(option: str) -> str:
@@ -333,18 +460,15 @@ def render_cross_hazard_section(combined_df: pd.DataFrame, show_detail: bool) ->
     )
 
     st.subheader(":material/search: Look up a school")
-    query = st.text_input(
-        "Type a school name", placeholder="e.g. Government Girls High School Model Town", key="overview_school_search",
-        label_visibility="collapsed",
+    picker = combined_df.assign(
+        school_choice=combined_df["school_name"].fillna("Unnamed school") + " · " + combined_df["district"].fillna("") + " · " + combined_df["emis_code"].astype(str)
+    ).sort_values("school_choice")
+    picked = st.selectbox(
+        "Pick a school", picker["school_choice"], index=None, key="overview_school_search",
+        placeholder="Start typing or pick a school from the list…", label_visibility="collapsed",
     )
-    if query:
-        matches = combined_df[combined_df["school_name"].str.contains(query, case=False, na=False)]
-        if matches.empty:
-            st.caption("No school matched that name in the current sidebar selection. Try a shorter search, or clear the district/level filters.")
-        else:
-            st.caption(f"Showing {min(len(matches), 8):,} of {len(matches):,} matches.")
-            for _, row in matches.head(8).iterrows():
-                render_school_card(row)
+    if picked:
+        render_school_card(picker.loc[picker["school_choice"] == picked].iloc[0])
 
     st.subheader(":material/join_inner: Where hazards overlap")
     st.caption("How many exposed schools face one hazard versus both, and which districts have the most schools facing both at once.")
@@ -445,7 +569,7 @@ def render_cross_hazard_section(combined_df: pd.DataFrame, show_detail: bool) ->
             )
 
     with st.expander(":material/menu_book: Glossary — what the terms on this page mean"):
-        st.dataframe(
+        render_table(
             pd.DataFrame([
                 ["EMIS code", "The government's unique ID number for a school."],
                 ["Government visit (PMIU)", "A field visit by government monitoring staff that records a school's enrolment, classrooms, toilets, electricity and water."],
@@ -455,8 +579,7 @@ def render_cross_hazard_section(combined_df: pd.DataFrame, show_detail: bool) ->
                 ["Compounding risk", "A school independently at Urgent or High concern for both heatwave and extreme rainfall — not just the worse of the two."],
                 ["Not enough data", "No recent government visit recorded the facts needed to judge coping capacity. This is a data gap, not a sign the school is safe."],
             ], columns=["Term", "Meaning"]),
-            hide_index=True, height=280, row_height=44,
-            column_config={"Term": st.column_config.TextColumn(width="small")},
+            column_widths={"Term": "small"},
         )
 
     st.caption("For hazard-specific timing, event history and downloadable data, open the Heat or Extreme rainfall sections above.")
@@ -482,15 +605,10 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
         exposure_col, capacity_col = st.columns([1, 1.5], gap="large")
         with exposure_col:
             st.markdown(f"**{cfg['exposure_amount_label']}**")
-            st.dataframe(
-                exposure_rule_table(base_frame, cfg["exposure_class_column"]), hide_index=True, height=170, row_height=48,
-            )
+            render_table(exposure_rule_table(base_frame, cfg["exposure_class_column"]))
         with capacity_col:
             st.markdown(f"**{cfg['capacity_label']}**")
-            st.dataframe(
-                cfg["capacity_rules_fn"](base_frame), hide_index=True, height=cfg["capacity_rules_height"], row_height=44,
-                column_config={"Dimension": st.column_config.TextColumn(width="medium")},
-            )
+            render_table(cfg["capacity_rules_fn"](base_frame), column_widths={"Dimension": "medium"})
             if cfg.get("capacity_caption"):
                 st.caption(cfg["capacity_caption"])
 
@@ -697,50 +815,7 @@ def school_profile(frame: pd.DataFrame, yearly_frame: pd.DataFrame, rainfall_fra
         st.metric("Heatwave days", f"{school['total_heatwave_days']:.0f}", border=True)
         st.metric("Capacity", school["essential_service_capacity"], border=True)
         st.metric("Selected visit date", visit_date, border=True)
-    st.dataframe(
-        pd.DataFrame([{
-            "Enrolment": school["total_enrolment"],
-            "Students per classroom": school["students_per_classroom"],
-            "Students per functional toilet": school["students_per_functional_toilet"],
-            "Electricity": school["electricity_status"],
-            "Water": school["water_status"],
-            "Selected visit date": school["monitoring_date_used"],
-            "Data quality": school["data_quality_flag"],
-        }]),
-        hide_index=True,
-        column_config={
-            "Students per classroom": st.column_config.NumberColumn(format="%d"),
-            "Students per functional toilet": st.column_config.NumberColumn(format="%.1f"),
-            "Selected visit date": st.column_config.DateColumn(format="DD MMM YYYY"),
-        },
-    )
-    st.subheader("Heatwave-year monitoring history")
-    st.caption("One selected monitoring visit per heatwave year. A blank monitoring date means there was no PMIU visit in that year.")
-    history = yearly_frame[yearly_frame["emis_code"].astype(str) == str(school["emis_code"])].sort_values("event_year")
-    history_columns = [
-        "event_year", "selected_event_code", "selected_event_start_date", "selected_event_heatwave_days",
-        "monitoring_date_used", "days_from_selected_event_start", "total_enrolment", "students_per_classroom",
-        "functional_toilets", "electricity_status", "water_status", "essential_service_capacity", "data_quality_flag",
-    ]
-    st.dataframe(
-        history[history_columns], hide_index=True,
-        column_config={
-            "event_year": st.column_config.NumberColumn("Heatwave year", format="%d"),
-            "selected_event_code": "Selected heatwave event",
-            "selected_event_start_date": st.column_config.DateColumn("Event start", format="DD MMM YYYY"),
-            "selected_event_heatwave_days": st.column_config.NumberColumn("Event heatwave days", format="%.0f"),
-            "monitoring_date_used": st.column_config.DateColumn("Selected monitoring date", format="DD MMM YYYY"),
-            "days_from_selected_event_start": st.column_config.NumberColumn("Days from event start", format="%d"),
-            "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"),
-            "students_per_classroom": st.column_config.NumberColumn("Students per classroom", format="%d"),
-            "functional_toilets": st.column_config.NumberColumn("Functional toilets", format="%.0f"),
-            "essential_service_capacity": "Service capacity",
-            "data_quality_flag": "Data quality",
-        },
-    )
 
-    st.divider()
-    st.subheader("Rainfall exposure & coping capacity")
     rain_match = rainfall_frame[rainfall_frame["emis_code"].astype(str) == str(school["emis_code"])]
     if rain_match.empty:
         st.caption("This school has no recorded extreme-rainfall exposure in 2021–2025, or was not matched to a Punjab EMIS code.")
@@ -752,42 +827,59 @@ def school_profile(frame: pd.DataFrame, yearly_frame: pd.DataFrame, rainfall_fra
             st.metric("Extreme-rainfall days", f"{rain_school['cumulative_extreme_days']:.0f}", border=True)
             st.metric("Coping capacity", rain_school["rainfall_coping_capacity"], border=True)
             st.metric("Selected visit date", rain_visit_date, border=True)
-        st.dataframe(
-            pd.DataFrame([{
-                "Events exposed": rain_school["events_exposed_count"],
-                "Exposure class": rain_school["exposure_class"],
-                "Structural condition": rain_school["structural_condition_status"],
-                "Learning-space continuity": rain_school["learning_space_status"],
-                "Sanitation": rain_school["sanitation_status"],
-                "Safe water": rain_school["safe_water_status"],
-                "Selected visit date": rain_school["monitoring_date_used"],
-                "Data quality": rain_school["data_quality_flag"],
-            }]),
-            hide_index=True,
-            column_config={"Selected visit date": st.column_config.DateColumn(format="DD MMM YYYY")},
-        )
-        st.caption("Rainfall-year monitoring history — one selected monitoring visit per exposed rainfall year.")
-        rain_history = rainfall_yearly_frame[rainfall_yearly_frame["emis_code"].astype(str) == str(school["emis_code"])].sort_values("event_year")
-        rain_history_columns = [
-            "event_year", "selected_event_code", "selected_event_start_date", "selected_event_extreme_days",
-            "monitoring_date_used", "days_from_selected_event_start", "total_enrolment",
-            "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status",
-            "rainfall_coping_capacity", "data_quality_flag",
-        ]
-        st.dataframe(
-            rain_history[rain_history_columns], hide_index=True,
-            column_config={
-                "event_year": st.column_config.NumberColumn("Rainfall year", format="%d"),
-                "selected_event_code": "Selected rainfall event",
-                "selected_event_start_date": st.column_config.DateColumn("Event start", format="DD MMM YYYY"),
-                "selected_event_extreme_days": st.column_config.NumberColumn("Event extreme-rainfall days", format="%.0f"),
-                "monitoring_date_used": st.column_config.DateColumn("Selected monitoring date", format="DD MMM YYYY"),
-                "days_from_selected_event_start": st.column_config.NumberColumn("Days from event start", format="%d"),
-                "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"),
-                "rainfall_coping_capacity": "Coping capacity",
-                "data_quality_flag": "Data quality",
-            },
-        )
+        st.caption(f"Exposure class: {rain_school['exposure_class']} · Events exposed since 2021: {rain_school['events_exposed_count']:.0f}")
+
+    st.subheader("School visit record")
+    st.caption(
+        "One row per year with a heatwave and/or rainfall exposure record, most recent first — heatwave and "
+        "rainfall use separately matched PMIU visits, so their visit dates can differ. A blank cell means that "
+        "hazard had no exposure or no matching visit that year."
+    )
+    hw_hist = yearly_frame[yearly_frame["emis_code"].astype(str) == str(school["emis_code"])][[
+        "event_year", "selected_event_code", "selected_event_heatwave_days", "monitoring_date_used",
+        "total_enrolment", "students_per_classroom", "functional_toilets", "electricity_status",
+        "water_status", "essential_service_capacity", "data_quality_flag",
+    ]]
+    rf_hist = rainfall_yearly_frame[rainfall_yearly_frame["emis_code"].astype(str) == str(school["emis_code"])][[
+        "event_year", "selected_event_code", "selected_event_extreme_days", "monitoring_date_used",
+        "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status",
+        "rainfall_coping_capacity", "data_quality_flag",
+    ]]
+    visit_record = pd.merge(hw_hist, rf_hist, on="event_year", how="outer", suffixes=("_heat", "_rain"))
+    visit_record["data_quality_flag"] = visit_record["data_quality_flag_heat"].combine_first(visit_record["data_quality_flag_rain"])
+    visit_record = visit_record.sort_values("event_year", ascending=False)
+    display_columns = [
+        "event_year",
+        "selected_event_code_heat", "selected_event_heatwave_days", "monitoring_date_used_heat",
+        "electricity_status", "water_status", "essential_service_capacity",
+        "selected_event_code_rain", "selected_event_extreme_days", "monitoring_date_used_rain",
+        "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status", "rainfall_coping_capacity",
+        "total_enrolment", "students_per_classroom", "functional_toilets", "data_quality_flag",
+    ]
+    st.dataframe(
+        visit_record[display_columns], hide_index=True, height=420,
+        column_config={
+            "event_year": st.column_config.NumberColumn("Year", format="%d"),
+            "selected_event_code_heat": "Heatwave event",
+            "selected_event_heatwave_days": st.column_config.NumberColumn("Heatwave days", format="%.0f"),
+            "monitoring_date_used_heat": st.column_config.DateColumn("Heatwave visit date", format="DD MMM YYYY"),
+            "electricity_status": "Electricity",
+            "water_status": "Water",
+            "essential_service_capacity": "Heatwave capacity",
+            "selected_event_code_rain": "Rainfall event",
+            "selected_event_extreme_days": st.column_config.NumberColumn("Rainfall days", format="%.0f"),
+            "monitoring_date_used_rain": st.column_config.DateColumn("Rainfall visit date", format="DD MMM YYYY"),
+            "structural_condition_status": "Structural",
+            "learning_space_status": "Learning space",
+            "sanitation_status": "Sanitation",
+            "safe_water_status": "Safe water",
+            "rainfall_coping_capacity": "Rainfall capacity",
+            "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"),
+            "students_per_classroom": st.column_config.NumberColumn("Students/classroom", format="%d"),
+            "functional_toilets": st.column_config.NumberColumn("Functional toilets", format="%.0f"),
+            "data_quality_flag": "Data quality",
+        },
+    )
 
 
 def render_school_lookup(cum: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -> None:
@@ -824,7 +916,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
     with st.container(border=True):
         st.markdown("#### :material/explore: How to read the atlas")
         st.caption("Use the sidebar filters and the technical-detail toggle to shape the same school population everywhere.")
-        st.dataframe(
+        render_table(
             pd.DataFrame([
                 ["Sidebar filters", "District and school level", "Filters every section."],
                 ["Show technical detail (sidebar)", "Raw priority codes, driver columns and CSV downloads", "Off by default for a plain-language view; turn on for the full underlying data and downloads."],
@@ -834,12 +926,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
                 ["Find a school", "Search or pick any school; see its full heatwave and rainfall history", "Use for a single school's story."],
                 ["How this works", "Definitions, matching rules, and priority construction for both hazards and the combined view", "Use this section when interpreting or reporting dashboard results."],
             ], columns=["Section", "What it shows", "How to use it"]),
-            hide_index=True, height=340, row_height=52,
-            column_config={
-                "Section": st.column_config.TextColumn(width="medium"),
-                "What it shows": st.column_config.TextColumn(width="large"),
-                "How to use it": st.column_config.TextColumn(width="large"),
-            },
+            column_widths={"Section": "medium", "What it shows": "large", "How to use it": "large"},
         )
 
     with st.container(border=True):
@@ -848,7 +935,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
             "'Where the risk is' is a per-school overlay of the two independent hazard-specific priorities below — "
             "it does not recompute exposure or capacity from scratch."
         )
-        st.dataframe(
+        render_table(
             pd.DataFrame([
                 ["Hazard exposure", "Heatwave only, Rainfall only, or Heatwave and rainfall", "Based on whether the school appears in the heatwave and/or rainfall cumulative vulnerability files."],
                 ["Combined priority", "The more severe (lower-numbered) of the heatwave and rainfall priorities", "Not an average. A school at heatwave Priority 1 and rainfall Priority 4 is shown as combined Priority 1."],
@@ -856,8 +943,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
                 ["Compounding high risk", "True when a school is independently Priority 1 or 2 on both heatwave and rainfall", "The clearest signal of a school needing attention on more than one hazard, not just the more severe one."],
                 ["Unclassified", "Neither hazard could assign a numbered priority", "Usually missing PMIU capacity data for both hazards, not evidence of low risk."],
             ], columns=["Field", "Values", "Rule"]),
-            hide_index=True, height=214, row_height=56,
-            column_config={"Field": st.column_config.TextColumn(width="medium")},
+            column_widths={"Field": "medium"},
         )
 
     with st.container(border=True):
@@ -867,33 +953,31 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
         with exposure_step:
             st.badge("Step 1 · Exposure", icon=":material/thermostat:", color="orange")
             st.markdown("**Cumulative heatwave exposure**")
-            st.dataframe(exposure_rule_table(cumulative, "total_heatwave_days"), hide_index=True, height=170, row_height=48)
+            render_table(exposure_rule_table(cumulative, "total_heatwave_days"))
         with capacity_step:
             st.badge("Step 2 · School capacity", icon=":material/electric_bolt:", color="blue")
             st.markdown("**Essential services at the selected PMIU visit**")
-            st.dataframe(
+            render_table(
                 pd.DataFrame([
                     ["Adequate", "Electricity and drinking water are both available, functional, and wholly provided."],
                     ["Weak", "Electricity and drinking water are both unavailable or non-functional."],
                     ["Partial", "Any other observed combination, including one adequate service and one weak/partial service."],
                     ["Missing", "No eligible heatwave-year visit, or electricity/water availability or functionality is missing."],
                 ], columns=["Class", "Rule"]),
-                hide_index=True, height=258, row_height=56,
             )
         method_priority_counts = cumulative["vulnerability_priority"].value_counts()
         st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
         st.markdown("**Combine exposure and capacity**")
-        st.dataframe(
+        render_table(
             pd.DataFrame([
-                [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(method_priority_counts.get("Priority 1", 0))],
-                [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(method_priority_counts.get("Priority 2", 0))],
-                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(method_priority_counts.get("Priority 3", 0))],
-                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(method_priority_counts.get("Priority 4", 0))],
-                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(method_priority_counts.get("Priority 5", 0))],
-                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(method_priority_counts.get("Unclassified - PMIU missing", 0))],
+                [PRIORITY_LABELS["Priority 1"], "High", "Weak", f"{int(method_priority_counts.get('Priority 1', 0)):,}"],
+                [PRIORITY_LABELS["Priority 2"], "High", "Partial", f"{int(method_priority_counts.get('Priority 2', 0)):,}"],
+                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", f"{int(method_priority_counts.get('Priority 3', 0)):,}"],
+                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", f"{int(method_priority_counts.get('Priority 4', 0)):,}"],
+                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", f"{int(method_priority_counts.get('Priority 5', 0)):,}"],
+                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", f"{int(method_priority_counts.get('Unclassified - PMIU missing', 0)):,}"],
             ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
-            hide_index=True, height=312, row_height=44,
-            column_config={"Priority": st.column_config.TextColumn(width="medium"), "Schools": st.column_config.NumberColumn(format="%d")},
+            column_widths={"Priority": "medium"},
         )
         st.info(
             "Priority rank orders schools within each category by cumulative heatwave days, then EMIS code. "
@@ -912,29 +996,25 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
             st.badge("Step 1 · Exposure", icon=":material/water_drop:", color="blue")
             st.markdown("**Cumulative rainfall exposure**")
             st.caption("Composite of event frequency, intensity and persistence — see the Extreme rainfall section.")
-            st.dataframe(
-                exposure_rule_table(rainfall_cumulative, "rainfall_exposure_score"), hide_index=True, height=170, row_height=48,
-            )
+            render_table(exposure_rule_table(rainfall_cumulative, "rainfall_exposure_score"))
         with rain_capacity_step:
             st.badge("Step 2 · Coping capacity", icon=":material/handyman:", color="orange")
             st.markdown("**Four PMIU-visit proxies, scored at the visit closest to one of the school's exposed rainfall years**")
-            st.dataframe(rain_capacity_rules(rainfall_cumulative), hide_index=True, height=214, row_height=44,
-                column_config={"Dimension": st.column_config.TextColumn(width="medium")})
+            render_table(rain_capacity_rules(rainfall_cumulative), column_widths={"Dimension": "medium"})
             st.caption("Each of the four scored dimensions contributes Adequate = 2, Partial = 1, Weak = 0 to a 0–8 capacity score.")
         rain_priority_counts = rainfall_cumulative["vulnerability_priority"].value_counts()
         st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
         st.markdown("**Combine exposure and coping capacity**")
-        st.dataframe(
+        render_table(
             pd.DataFrame([
-                [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(rain_priority_counts.get("Priority 1", 0))],
-                [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(rain_priority_counts.get("Priority 2", 0))],
-                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(rain_priority_counts.get("Priority 3", 0))],
-                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(rain_priority_counts.get("Priority 4", 0))],
-                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(rain_priority_counts.get("Priority 5", 0))],
-                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(rain_priority_counts.get("Unclassified - capacity data missing", 0))],
+                [PRIORITY_LABELS["Priority 1"], "High", "Weak", f"{int(rain_priority_counts.get('Priority 1', 0)):,}"],
+                [PRIORITY_LABELS["Priority 2"], "High", "Partial", f"{int(rain_priority_counts.get('Priority 2', 0)):,}"],
+                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", f"{int(rain_priority_counts.get('Priority 3', 0)):,}"],
+                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", f"{int(rain_priority_counts.get('Priority 4', 0)):,}"],
+                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", f"{int(rain_priority_counts.get('Priority 5', 0)):,}"],
+                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", f"{int(rain_priority_counts.get('Unclassified - capacity data missing', 0)):,}"],
             ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
-            hide_index=True, height=312, row_height=44,
-            column_config={"Priority": st.column_config.TextColumn(width="medium"), "Schools": st.column_config.NumberColumn(format="%d")},
+            column_widths={"Priority": "medium"},
         )
         st.info(
             "Priority rank orders schools within each category by rainfall exposure score, then EMIS code. It supports "
