@@ -1,6 +1,6 @@
-# Punjab school monitoring, heatwave and rainfall exposure data
+# Punjab school climate-exposure dashboard
 
-> **Private dashboard package:** this repository intentionally contains only the Streamlit dashboard and its final heatwave and rainfall analysis outputs. The raw monitoring file, raw exposure files, visit-level merges, source reports, and build artefacts remain only in the local research workspace.
+> **Private dashboard package:** this repository intentionally contains only the Streamlit dashboard and its final heatwave, rainfall and combined analysis outputs. The raw monitoring file, raw exposure files, visit-level merges, source reports, and SQL build scripts remain only in the local research workspace (see `.gitignore`).
 
 ## Run the dashboard
 
@@ -9,28 +9,52 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The app reads:
+Everyone invited to the private app can view and download the filtered results for every tab.
 
-- `final_school_heatwave_vulnerability_nearest_event.csv` — one cumulative row per exposed school.
-- `school_year_heatwave_capacity.csv` — one row per school and heatwave year, using the monitoring visit closest to a heatwave in that same year.
-- `punjab_school_rainfall_exposure_clean.csv`, `punjab_rainfall_event_summary.csv`, `punjab_rainfall_event_disaggregation.csv` — Punjab extreme-rainfall exposure, 2021–2025, one row per school / event / event-and-group.
-- `final_school_rainfall_vulnerability_nearest_event.csv` — one cumulative row per rainfall-exposed school, with a PMIU-visit-based coping-capacity priority.
-- `school_year_rainfall_capacity.csv` — one row per school and rainfall-exposure year, using the monitoring visit closest to one of that school's extreme-rainfall events in the same year.
+## What the dashboard answers
 
-The current dashboard package includes individual-school data. Everyone invited to the private app can view and download the filtered results.
+The app is one Streamlit page with seven tabs. Start at **Combined hazards** for a single cross-hazard view; drill into **Heatwave** or **Rainfall** tabs for hazard-specific detail; use **School profile** to look up one school across both hazards.
 
-## Purpose
+| Tab | Question it answers |
+| --- | --- |
+| 🌍 Combined hazards | Which schools face heatwave risk, rainfall risk, or both — and where do the two hazards compound? |
+| 📊 Heatwave decision view | Which schools are the most urgent heatwave-vulnerability targets right now? |
+| 📈 Heatwave cumulative view | How much cumulative heatwave exposure has each school had since 2021, and with what service capacity? |
+| 📅 Heatwave school-year view | How did a specific school look in a specific heatwave year? |
+| 💧 Rainfall exposure & priority | Where and when did extreme-rainfall events hit, and which exposed schools have weak coping capacity? |
+| 🏫 School profile | Full heatwave and rainfall history for one chosen school. |
+| ℹ️ Method | Definitions, matching rules, and priority construction for both hazards and the combined view — read this before citing any number from the app. |
 
-This folder links Punjab school-monitoring visits to school-level heatwave and extreme-rainfall exposure. It supports two complementary questions per hazard:
+Sidebar filters (district, school level) apply to every tab.
 
-1. Which schools and enrolled students were exposed to recorded heatwave or extreme-rainfall events?
-2. How did monitoring indicators, especially enrolment, look before and after those events?
+## Data the app reads
 
-The data are suitable for descriptive analysis and for building an event-study panel. They do not, by themselves, establish that a heatwave or rainfall event caused a change in enrolment or attendance.
+| File | Rows | Description |
+| --- | --- | --- |
+| `final_school_heatwave_vulnerability_nearest_event.csv` | ~52,053 | One cumulative row per heatwave-exposed school, 2021–2026, with vulnerability priority. |
+| `school_year_heatwave_capacity.csv` | ~380,000 | One row per school × heatwave year, using the PMIU visit closest to that year's heatwave. |
+| `punjab_school_rainfall_exposure_clean.csv` | ~52,107 | One row per Punjab school (including never-exposed), rainfall exposure across 46 events, 2021–2025. |
+| `punjab_rainfall_event_summary.csv`, `punjab_rainfall_event_disaggregation.csv` | 46 / ~13,000 | Event-level and event×group rainfall roll-ups. |
+| `final_school_rainfall_vulnerability_nearest_event.csv` | ~51,320 | One cumulative row per rainfall-exposed school, with a PMIU-visit-based coping-capacity priority. |
+| `school_year_rainfall_capacity.csv` | ~208,000 | One row per school × rainfall-exposure year, using the PMIU visit closest to that year's event. |
 
-## Rainfall coping-capacity methodology
+The app builds one more dataset **in memory, on load** — it is not a file:
 
-The rainfall vulnerability priority mirrors the heatwave methodology: cumulative extreme-rainfall exposure (already computed in `punjab_school_rainfall_exposure_clean.csv`, following `Punjab_School_Extreme_Rainfall_Vulnerability_Analysis.docx`) is combined with a PMIU-visit-based coping-capacity score, using the monitoring visit closest to one of the school's own extreme-rainfall event years. No ASC/SIS capacity extract was available, so coping capacity uses four PMIU-visit proxies instead of the docx's five ASC/SIS dimensions:
+- **Combined hazard table** (`build_combined()` in `app.py`): an outer join of the two cumulative vulnerability files on EMIS code, adding `hazard_exposure` (Heatwave only / Rainfall only / Heatwave and rainfall), `combined_priority` (the more severe of the two hazard priorities), `combined_priority_driver`, and `compounding_high_risk` (independently Priority 1–2 on both hazards). See the Method tab for the exact rule.
+
+## Methodology
+
+Full detail, including live counts from the current data, is in the app's **Method** tab. Summary:
+
+### Heatwave (`Punjab School Heatwave Vulnerability Analysis.docx`)
+
+1. **Exposure** — cumulative heatwave days per school across all matched events, classified Low / Moderate / High by the 33rd/67th percentile among exposed schools.
+2. **Capacity** — electricity and drinking-water availability/functionality/extent from the PMIU visit closest to a heatwave in one of that school's exposed years, classified Adequate / Weak / Partial / Missing.
+3. **Priority** — exposure class × capacity class → Priority 1 (High/Weak, most urgent) through Priority 5 (Low-Moderate/Adequate), or "Unclassified - PMIU missing" when capacity can't be determined.
+
+### Rainfall (`Punjab_School_Extreme_Rainfall_Vulnerability_Analysis.docx`)
+
+Same two-step exposure × capacity logic, adapted because no ASC/SIS capacity extract was available — only PMIU visit data (the same source heatwave uses):
 
 | Dimension | Proxy | PMIU coverage |
 | --- | --- | --- |
@@ -40,61 +64,64 @@ The rainfall vulnerability priority mirrors the heatwave methodology: cumulative
 | Safe water | Water availability, functionality and extent | 96.2% |
 | Drainage/sewerage | Only free-text mentions | 0.04% — excluded, not usable |
 
-Priority combines exposure class (Low/Moderate/High, from the cumulative exposure file) with the four-dimension coping-capacity class (Adequate/Partial/Weak), using the same Priority 1–5 table as heatwave. Schools never exposed to an extreme-rainfall event are not assigned a priority. No damage-severity modifier is applied — the docx's reported rain/flood damage field was not available in the PMIU visit data used here.
+Priority combines exposure class (Low/Moderate/High) with the four-dimension coping-capacity class, using the same Priority 1–5 table as heatwave. Schools never exposed to an extreme-rainfall event are not assigned a priority — they remain visible in the exposure map/table as "No recorded exposure."
+
+**Known deviations from the rainfall docx**, since the assumed ASC/SIS extract doesn't exist in this repo:
+- No damage-severity modifier (the docx's reported rain/flood damage field isn't in PMIU visit data).
+- No `dangerous_classrooms` / `water_quality` fields (PMIU has no equivalent).
+- Priority is computed only for exposed schools, not the full ~52,000-school Punjab population the docx specifies.
+- `rural_urban` is not available in either source file.
+
+### Combined hazards
+
+A per-school overlay of the two independent priorities above, joined on EMIS code — it does not recompute exposure or capacity. `combined_priority` takes the more severe (lower-numbered) of the heatwave and rainfall priorities; `compounding_high_risk` flags schools that are independently Priority 1–2 on **both** hazards. This is a lightweight stand-in for the scoping paper's Workstream 3 Tier A composite risk index, not the full index — it has no district-level SES, population-density or poverty proxies, and no Workstream 2 observed-sensitivity input.
 
 ## Repository file guide
 
 | File | Short description |
 | --- | --- |
-| `app.py` | Streamlit dashboard application. It reads the two final analysis CSVs and renders the decision view, cumulative view, annual view, and school profile screens. |
+| `app.py` | Streamlit dashboard application — all seven tabs described above. |
 | `requirements.txt` | Core Python dependencies needed to run the dashboard. |
 | `requirements-analytics.txt` | Extra Python packages used for analysis, SQL, and data-processing work. |
+| `AGENTS.md` | Instructions for AI coding agents working in this repository. |
+| `Punjab School Heatwave Vulnerability Analysis.docx` | Heatwave methodology brief. |
+| `Punjab_School_Extreme_Rainfall_Vulnerability_Analysis.docx` | Rainfall methodology brief. |
+| `Climate Disruptions Scoping Paper Mid Point Progress Report.pdf` | Source of the Workstream 1–3 policy questions the dashboard answers. |
 | `dare_rc.duckdb` | Local DuckDB database used for intermediate analysis and SQL-based data assembly. |
-| `data.jsonl.gz` | Compressed raw Punjab monitoring records. One JSON object per school visit, covering 2014 to May 2026. |
-| `school_heatwave_event_exposure_2021_2026.csv` | Source heatwave exposure output for affected schools in Punjab and Sindh. One row per school-event exposure record. |
-| `school_event_clean.csv` | Cleaned school-event exposure file used as an intermediate processing input. |
-| `monitoring_heatwave_events_2021_2026.csv` | Punjab-only analysis file created from the source exposure and monitoring data. It retains affected Punjab school-event rows and attaches monitoring visits where available. |
-| `final_school_heatwave_vulnerability.csv` | Earlier/alternative vulnerability output. Useful as a historical or comparison version of the cumulative vulnerability file. |
-| `final_school_heatwave_vulnerability_nearest_event.csv` | Final cumulative dashboard dataset. One row per exposed school, used for the main decision view and the most shareable team-facing summary. |
-| `school_year_heatwave_capacity.csv` | School-by-year analysis file. One row per school and heatwave year, using the monitoring visit closest to a heatwave event in that same year. |
-| `build_merged_visits.sql` | SQL logic for merging school-event exposure data with monitoring visits. |
-| `build_vulnerability_analysis.sql` | SQL logic for building the vulnerability analysis dataset. |
-| `build_school_year_capacity.sql` | SQL logic for generating the school-year capacity view used in the annual dashboard tab. |
-| `build_final_vulnerability_nearest_event.sql` | SQL logic for producing the final, cumulative nearest-event vulnerability file used by the dashboard. |
-| `build_rainfall_event_clean.sql` | SQL logic for extracting Punjab extreme-rainfall school-event rows and correcting the EMIS code, from the rainfall team's extreme-only exposure file. |
-| `build_school_year_rainfall_capacity.sql` | SQL logic for generating the school-year rainfall capacity view (one row per school and rainfall-exposure year). |
-| `build_final_rainfall_vulnerability_nearest_event.sql` | SQL logic for producing the final, cumulative nearest-event rainfall vulnerability and priority file used by the dashboard. |
-| `intro meeting.txt` | Notes or discussion summary from an introductory meeting. |
+| `data.jsonl.gz` | Compressed raw Punjab PMIU monitoring records. One JSON object per school visit, covering 2014 to May 2026. |
+| `school_heatwave_event_exposure_2021_2026.csv` | Source heatwave exposure output for affected schools in Punjab and Sindh. |
+| `school_event_clean.csv` | Cleaned Punjab heatwave school-event file, intermediate input to the heatwave build scripts. |
+| `rainfall_event_clean.csv` | Cleaned Punjab extreme-rainfall school-event file (EMIS-corrected), intermediate input to the rainfall build scripts. |
+| `monitoring_heatwave_events_2021_2026.csv` | Punjab-only visit-level merge of heatwave exposure and PMIU monitoring visits. |
+| `final_school_heatwave_vulnerability.csv` | Earlier/alternative heatwave vulnerability output, kept for comparison. |
+| `final_school_heatwave_vulnerability_nearest_event.csv` | Final cumulative heatwave dashboard dataset. |
+| `school_year_heatwave_capacity.csv` | School-by-year heatwave capacity dataset. |
+| `final_school_rainfall_vulnerability_nearest_event.csv` | Final cumulative rainfall dashboard dataset. |
+| `school_year_rainfall_capacity.csv` | School-by-year rainfall capacity dataset. |
+| `build_merged_visits.sql` | SQL for merging heatwave school-event exposure with monitoring visits. |
+| `build_vulnerability_analysis.sql` | SQL for the heatwave vulnerability analysis dataset. |
+| `build_school_year_capacity.sql` | SQL for the heatwave school-year capacity view. |
+| `build_final_vulnerability_nearest_event.sql` | SQL for the final cumulative nearest-event heatwave vulnerability file. |
+| `build_rainfall_event_clean.sql` | SQL for extracting and EMIS-correcting Punjab extreme-rainfall school-event rows. |
+| `build_school_year_rainfall_capacity.sql` | SQL for the rainfall school-year capacity view. |
+| `build_final_rainfall_vulnerability_nearest_event.sql` | SQL for the final cumulative nearest-event rainfall vulnerability and priority file. |
+| `intro meeting.txt` | Notes from an introductory meeting. |
 | `tmp/` | Temporary working folder for local notes, drafts, and supporting documents. |
-| `tmp/pdfs/climate_disruptions_scoping.txt` | Supporting scoping note tied to the climate disruptions work. |
+| `tmp/pdfs/climate_disruptions_scoping.txt` | Plain-text extract of the scoping paper, used for the Workstream 1–3 wording. |
+| `rainfall-data/` | Raw rainfall exposure and enrolment inputs from the rainfall workstream, kept local (large files). |
 
-## High-level coverage and insights
+## How schools are linked across sources (EMIS code correction)
 
-- The merged Punjab file contains 52,053 distinct exposed schools, 14 Punjab heatwave events, and 1,563,095 rows.
-- 51,948 exposure-school IDs match a monitoring EMIS code after removing the leading `1` from the exposure-file EMIS code. The remaining 105 do not have a direct monitoring-ID match.
-- 47,643 schools have at least one monitoring visit in the same year as an exposure event. Their matching visit-event rows have monitoring fields populated.
-- Monitoring is not continuous monthly coverage for every school. A missing monitoring value means no visit was available for that school/event year; it does not mean zero enrolment or zero attendance.
-- The heatwave source contains affected-school rows (`affected_flag = 1`). It does not by itself provide a complete unexposed comparison group.
-- The monitoring and heatwave school masters were compiled at different times. School names and school levels can differ even when the corrected EMIS code matches; use the corrected EMIS code as the linkage key.
-
-## How the files were linked
-
-For Punjab, the exposure EMIS code has one extra leading digit:
+Both hazards' source files use a 9-digit exposure EMIS code with an extra leading `1`; PMIU monitoring visits use the 8-digit code without it:
 
 ```text
 Exposure EMIS:   137110004
 Monitoring EMIS:  37110004
 ```
 
-The merged file uses:
+Every build script applies `monitoring_emis = exposure_emis without its first character` before joining to `data.jsonl`. The same corrected 8-digit code is the `emis_code` in every dashboard CSV, which is what makes the heatwave and rainfall cumulative files directly joinable for the Combined hazards tab.
 
-```text
-monitoring_emis = exposure_emis without its first character
-```
-
-Each heatwave exposure row is retained. Monitoring visits are joined only when they have both the same corrected EMIS code and the same calendar year as the heatwave event. A school may therefore appear multiple times: once for every monitoring visit and heatwave event in the relevant year.
-
-## Reading `monitoring_heatwave_events_2021_2026.csv`
+## Reading `monitoring_heatwave_events_2021_2026.csv` (local-only, not published)
 
 ### Exposure and event fields
 
@@ -118,7 +145,7 @@ Each heatwave exposure row is retained. Monitoring visits are joined only when t
 | `classrooms_total`, `classrooms_used_for_teaching`, `classrooms_used_for_storage` | Classroom counts recorded at the visit. |
 | `toilets_available`, `toilets_functional` | Toilet counts recorded at the visit. |
 | `electricity_*`, `drinking_water_*`, `toilet_facility_*`, `boundary_wall_*` | Availability and functionality of core facilities. |
-| `monitoring_record_json` | The complete source monitoring record for that visit, including all remaining nested JSONL fields. It is empty when there is no same-year monitoring visit. |
+| `monitoring_record_json` | The complete source monitoring record for that visit, including all remaining nested JSONL fields. Empty when there is no same-year monitoring visit. |
 | `days_from_event_start` | Visit date minus heatwave start date. Negative values are before the event; positive values are after it. |
 
 ### Filter flags
@@ -154,6 +181,9 @@ ORDER BY event_code, days_from_event_start;
 
 ## Important limitations
 
-- Same-year matching is a convenient first integration step. It is not a causal design on its own.
-- Close-together heatwaves can give the same visit more than one event row. Account for overlapping event windows before estimating effects.
-- The file covers exposed schools. A proper exposed-versus-unexposed analysis requires a complete Punjab school-location master with zero-exposure records for schools outside each event footprint.
+- **Not causal.** Same-year/nearest-visit matching is a descriptive integration step, for both hazards and the combined view. It is not an event-study or causal design.
+- **Enrolment-disruption analysis (Workstream 2) is not implemented.** It needs a monthly enrolment panel and an exposed-versus-unexposed event-study design. `rainfall-data/punjab_school_monthly_enrolment_2021_2025.csv` exists locally as a starting point but isn't wired into the dashboard.
+- **Combined hazards is a two-hazard overlay, not the full Workstream 3 composite index.** No district-level SES, population-density or poverty proxies are included.
+- **Priority supports review and targeting, not a causal-impact ranking**, for heatwave, rainfall, and the combined view alike.
+- **Overlapping events.** Close-together events can give the same visit more than one event row; account for overlapping windows before estimating effects.
+- **Exposed-schools-only coverage** for the heatwave file and the two priority files. A complete unexposed comparison group needs a full Punjab school-location master.
