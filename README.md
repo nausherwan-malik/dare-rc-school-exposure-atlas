@@ -9,60 +9,43 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Everyone invited to the private app can view and download the filtered results for every tab.
+Everyone invited to the private app can view and download the filtered results for every section.
 
 ## What the dashboard answers
 
-The app has **two modes**, switched with a segmented control at the top of the page. Both read the same underlying data and respect the same sidebar filters (district, school level) — they differ only in how much detail and jargon they show.
+The app is a **single page with five sections**, switched with a segmented control at the top. Every section reads the same underlying data and respects the same sidebar filters (district, school level). A sidebar toggle, **"Show technical detail,"** reveals raw priority codes, the combined-view driver column, full data tables and CSV downloads — off by default, so the plain-language view is what everyone sees first; on for anyone who wants the underlying rigor. Nothing in the plain-language state is a separate calculation — every number is the same one shown with detail on, just relabelled.
 
-### 🏠 Simple overview (default)
-
-One scrollable page for anyone — policymakers, journalists, parents, field staff — with no dashboard experience required:
-
-- A plain-language explanation of what the page shows, up front.
-- Headline numbers ("students in schools with any climate exposure", "schools needing urgent attention").
-- **Look up a school** — type a name, get a plain-language risk card per match ("🔴 Urgent · Faces both heatwaves and extreme rainfall"), with a "See technical details" expander for anyone who wants the underlying codes and numbers.
-- A single combined-risk map with a plain-language legend (Urgent / High concern / Watch / Lower concern / Not enough data).
-- The districts needing the most attention, as a simple bar chart.
-- Two explainer cards answering "what is a heatwave / extreme-rainfall event, in plain terms."
-- A glossary translating every technical term (EMIS code, PMIU visit, exposure, coping capacity, priority, compounding risk) into one plain sentence each.
-
-Nothing in Simple overview is a new calculation — every number is pulled from the same combined dataset the detailed tabs use, just relabelled and reorganized. The technical detail is one click away, never hidden permanently.
-
-### 🔬 Full dashboard
-
-The seven-tab, research-grade view, for anyone who needs the underlying rigor — full filtering, every column, every download, every methodology note.
-
-| Tab | Question it answers |
+| Section | Question it answers |
 | --- | --- |
-| 🌍 Combined hazards | Which schools face heatwave risk, rainfall risk, or both — and where do the two hazards compound? |
-| 📊 Heatwave decision view | Which schools are the most urgent heatwave-vulnerability targets right now? |
-| 📈 Heatwave cumulative view | How much cumulative heatwave exposure has each school had since 2021, and with what service capacity? |
-| 📅 Heatwave school-year view | How did a specific school look in a specific heatwave year? |
-| 💧 Rainfall exposure & priority | Where and when did extreme-rainfall events hit, and which exposed schools have weak coping capacity? |
-| 🏫 School profile | Full heatwave and rainfall history for one chosen school. |
-| ℹ️ Method | Definitions, matching rules, and priority construction for both hazards and the combined view — read this before citing any number from the app. |
+| 🌍 Where the risk is | Which schools face heatwave risk, rainfall risk, or both — and where do the two hazards compound? Includes a school search. |
+| 🌡️ Heat | Which schools have the most cumulative heatwave exposure since 2021, with what coping capacity, and how did a specific year look? |
+| 💧 Extreme rainfall | Which schools have the most cumulative extreme-rainfall exposure since 2021, with what coping capacity, when did each of the 46 events hit, and how did a specific year look? |
+| 🏫 Find a school | Search or pick any school; see its full heatwave and rainfall history. |
+| ℹ️ How this works | Definitions, matching rules, and priority construction for both hazards and the combined view — read this before citing any number from the app. |
 
-Every table has a download button so filtered results can leave the app as CSV.
+Heat and Extreme rainfall are built from **one shared renderer** in `app.py` (`render_hazard_section`), configured per hazard — same layout, same order, same "how exposure and coping capacity are measured" table up front, same map/legend/shortlist pattern — so the two hazards read as one system rather than two independently built pages. Every map is centred and zoom-limited to Punjab (no world view), flat (no 3D tilt), and has a clickable, live-count legend (`st.pills`, never a static badge row).
+
+Every table has a download button (when technical detail is on) so filtered results can leave the app as CSV.
 
 ## Data the app reads
 
 | File | Rows | Description |
 | --- | --- | --- |
-| `final_school_heatwave_vulnerability_nearest_event.csv` | ~52,053 | One cumulative row per heatwave-exposed school, 2021–2026, with vulnerability priority. |
-| `school_year_heatwave_capacity.csv` | ~380,000 | One row per school × heatwave year, using the PMIU visit closest to that year's heatwave. |
-| `punjab_school_rainfall_exposure_clean.csv` | ~52,107 | One row per Punjab school (including never-exposed), rainfall exposure across 46 events, 2021–2025. |
-| `punjab_rainfall_event_summary.csv`, `punjab_rainfall_event_disaggregation.csv` | 46 / ~13,000 | Event-level and event×group rainfall roll-ups. |
-| `final_school_rainfall_vulnerability_nearest_event.csv` | ~51,320 | One cumulative row per rainfall-exposed school, with a PMIU-visit-based coping-capacity priority. |
-| `school_year_rainfall_capacity.csv` | ~208,000 | One row per school × rainfall-exposure year, using the PMIU visit closest to that year's event. |
+| `final_school_heatwave_vulnerability_nearest_event.csv` | ~52,053 | One cumulative row per heatwave-exposed school, 2021–2026, with vulnerability priority. Loaded eagerly. |
+| `final_school_rainfall_vulnerability_nearest_event.csv` | ~51,320 | One cumulative row per rainfall-exposed school, with a PMIU-visit-based coping-capacity priority. Loaded eagerly. |
+| `punjab_rainfall_event_summary.csv`, `punjab_rainfall_event_disaggregation.csv` | 46 / ~13,000 | Event-level and event×group rainfall roll-ups, used by the 46-event timeline. Loaded only when that panel is opened. |
+| `school_year_heatwave_capacity.csv` | ~380,000 | One row per school × heatwave year, using the PMIU visit closest to that year's heatwave. Loaded lazily — only when the Heat section's "Year-by-year detail" expander is opened, or a school is looked up. |
+| `school_year_rainfall_capacity.csv` | ~208,000 | One row per school × rainfall-exposure year, using the PMIU visit closest to that year's event. Same lazy-load rule as above. |
 
 The app builds one more dataset **in memory, on load** — it is not a file:
 
-- **Combined hazard table** (`build_combined()` in `app.py`): an outer join of the two cumulative vulnerability files on EMIS code, adding `hazard_exposure` (Heatwave only / Rainfall only / Heatwave and rainfall), `combined_priority` (the more severe of the two hazard priorities), `combined_priority_driver`, `compounding_high_risk` (independently Priority 1–2 on both hazards), and `combined_enrolment`. See the Method tab for the exact rule. **This one table powers both dashboard modes** — Simple overview relabels it in plain language; the Combined hazards tab in Full dashboard shows it directly.
+- **Combined hazard table** (`build_combined()` in `app.py`): an outer join of the two cumulative vulnerability files on EMIS code, adding `hazard_exposure` (Heatwave only / Rainfall only / Heatwave and rainfall), `combined_priority` (the more severe of the two hazard priorities), `combined_priority_driver`, `compounding_high_risk` (independently Priority 1–2 on both hazards), and `combined_enrolment`. See "How this works" for the exact rule. **This one table powers the Where the risk is section** — the plain-language and technical-detail states are just two renderings of it.
+
+`punjab_school_rainfall_exposure_clean.csv` (the full ~52,107-school Punjab population, including never-exposed schools) is **not read by the dashboard** — it stays local as a build input to `final_school_rainfall_vulnerability_nearest_event.csv`. The live app only shows the ~51,320 schools that have actually been exposed to at least one hazard; this keeps every section's map and shortlist symmetric between heatwave and rainfall.
 
 ## Methodology
 
-Full detail, including live counts from the current data, is in the app's **Method** tab. Summary:
+Full detail, including live counts from the current data, is in the app's **How this works** section. Summary:
 
 ### Heatwave (`Punjab School Heatwave Vulnerability Analysis.docx`)
 
@@ -90,15 +73,15 @@ Priority combines exposure class (Low/Moderate/High) with the four-dimension cop
 - Priority is computed only for exposed schools, not the full ~52,000-school Punjab population the docx specifies.
 - `rural_urban` is not available in either source file.
 
-### Combined hazards
+### Where the risk is (combined hazards)
 
-A per-school overlay of the two independent priorities above, joined on EMIS code — it does not recompute exposure or capacity. `combined_priority` takes the more severe (lower-numbered) of the heatwave and rainfall priorities; `compounding_high_risk` flags schools that are independently Priority 1–2 on **both** hazards. This is a lightweight stand-in for the scoping paper's Workstream 3 Tier A composite risk index, not the full index — it has no district-level SES, population-density or poverty proxies, and no Workstream 2 observed-sensitivity input.
+A per-school overlay of the two independent priorities above, joined on EMIS code — it does not recompute exposure or capacity. `combined_priority` takes the more severe (lower-numbered) of the heatwave and rainfall priorities; `compounding_high_risk` flags schools that are independently Priority 1–2 on **both** hazards. This is a lightweight stand-in for the scoping paper's Workstream 3 Tier A composite risk index, not the full index — it has no district-level SES, population-density or poverty proxies, and no Workstream 2 observed-sensitivity input. (This scope note is documented here for maintainers; the live app itself only states what it does answer — see "Framing" below.)
 
 ## Repository file guide
 
 | File | Short description |
 | --- | --- |
-| `app.py` | Streamlit dashboard application — the Simple overview / Full dashboard mode toggle, the seven detailed tabs, and `build_combined()` / `render_overview()`. |
+| `app.py` | Streamlit dashboard application — the five-section navigation, the shared `render_hazard_section()` renderer with its `HEAT_CONFIG`/`RAIN_CONFIG`, and `build_combined()` / `render_cross_hazard_section()`. |
 | `requirements.txt` | Core Python dependencies needed to run the dashboard. |
 | `requirements-analytics.txt` | Extra Python packages used for analysis, SQL, and data-processing work. |
 | `AGENTS.md` | Instructions for AI coding agents working in this repository. |
@@ -137,7 +120,7 @@ Exposure EMIS:   137110004
 Monitoring EMIS:  37110004
 ```
 
-Every build script applies `monitoring_emis = exposure_emis without its first character` before joining to `data.jsonl`. The same corrected 8-digit code is the `emis_code` in every dashboard CSV, which is what makes the heatwave and rainfall cumulative files directly joinable for the Combined hazards tab.
+Every build script applies `monitoring_emis = exposure_emis without its first character` before joining to `data.jsonl`. The same corrected 8-digit code is the `emis_code` in every dashboard CSV, which is what makes the heatwave and rainfall cumulative files directly joinable in the Where the risk is section.
 
 ## Reading `monitoring_heatwave_events_2021_2026.csv` (local-only, not published)
 
@@ -197,11 +180,15 @@ GROUP BY event_code, days_from_event_start
 ORDER BY event_code, days_from_event_start;
 ```
 
+## Framing: what the app says versus what this README says
+
+The live dashboard states what it **does** answer (Policy Question 1 — where, when, how many students, by level and gender, for both hazards) and does not name unanswered policy questions or unbuilt workstreams anywhere in its UI — a policymaker opening the app sees a complete, confident tool, not a list of gaps. This README is the maintainer/methodology record and keeps the fuller, honest scope picture below, including what the app deliberately doesn't attempt yet. If you're extending the app's UI copy, keep that split: state capability in-app, document limitations here.
+
 ## Important limitations
 
 - **Not causal.** Same-year/nearest-visit matching is a descriptive integration step, for both hazards and the combined view. It is not an event-study or causal design.
-- **Enrolment-disruption analysis (Workstream 2) is not implemented.** It needs a monthly enrolment panel and an exposed-versus-unexposed event-study design. `rainfall-data/punjab_school_monthly_enrolment_2021_2025.csv` exists locally as a starting point but isn't wired into the dashboard.
-- **Combined hazards is a two-hazard overlay, not the full Workstream 3 composite index.** No district-level SES, population-density or poverty proxies are included.
+- **Enrolment-disruption analysis (Policy Question 2 / Workstream 2) is not implemented.** It needs a monthly enrolment panel and an exposed-versus-unexposed event-study design. `rainfall-data/punjab_school_monthly_enrolment_2021_2025.csv` exists locally as a starting point but isn't wired into the dashboard.
+- **"Where the risk is" is a two-hazard overlay, not the full Workstream 3 composite index.** No district-level SES, population-density or poverty proxies are included.
 - **Priority supports review and targeting, not a causal-impact ranking**, for heatwave, rainfall, and the combined view alike.
 - **Overlapping events.** Close-together events can give the same visit more than one event row; account for overlapping windows before estimating effects.
 - **Exposed-schools-only coverage** for the heatwave file and the two priority files. A complete unexposed comparison group needs a full Punjab school-location master.
