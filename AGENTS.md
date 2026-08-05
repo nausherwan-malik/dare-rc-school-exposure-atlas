@@ -6,6 +6,8 @@ Instructions for AI coding agents working in this repository. Read this before t
 
 A Streamlit dashboard (`app.py`) that shows Punjab school exposure to two climate hazards — heatwave and extreme rainfall — plus a combined cross-hazard view, PMIU-visit-based coping-capacity, and vulnerability priority. It answers the Workstream 1 and Workstream 2 policy questions from `Climate Disruptions Scoping Paper Mid Point Progress Report.pdf`, following the methodology in `Punjab School Heatwave Vulnerability Analysis.docx` and `Punjab_School_Extreme_Rainfall_Vulnerability_Analysis.docx`.
 
+The app has **two modes**, toggled by `view_mode` (a `st.segmented_control` near the top): **🏠 Simple overview** (default — plain language, one page, for a non-technical audience) and **🔬 Full dashboard** (the seven-tab research view). Both modes read the same underlying data; Simple overview never introduces a new number, only relabels and reorganizes what the detailed tabs already compute. See README's "What the dashboard answers" for the full description of each mode.
+
 This is a **private dashboard package**: `.gitignore` blocks everything except the app, its documentation, and its final CSV outputs. Raw sources, intermediate files, and SQL build scripts stay local — never remove them from `.gitignore`'s exclusion just to "make them visible"; if a new derived file needs to ship with the dashboard, add it to the allowlist explicitly and say why.
 
 ## Before making changes
@@ -31,17 +33,21 @@ This is a **private dashboard package**: `.gitignore` blocks everything except t
 ## When you change `app.py`
 
 1. **Run `python3 -m py_compile app.py`** before anything else — cheap and catches syntax errors immediately.
-2. **Smoke-test with Streamlit's `AppTest`**, not just a visual glance — it's headless, fast, and catches exceptions across every tab without needing a browser:
+2. **Smoke-test with Streamlit's `AppTest`, in BOTH modes** — it's headless, fast, and catches exceptions without needing a browser. `view_mode` is a plain Python `if/else`, not `st.tabs`, so **only the active branch executes per run** — testing the default (`at.run()`) alone only exercises Simple overview, and only exercises Full dashboard's seven tabs after you switch modes:
    ```python
    from streamlit.testing.v1 import AppTest
    at = AppTest.from_file('app.py', default_timeout=300)
-   at.run()
+   at.run()                                   # Simple overview (default)
    assert len(at.exception) == 0, at.exception
+   at.segmented_control[0].set_value('🔬 Full dashboard').run()   # Full dashboard
+   assert len(at.exception) == 0, at.exception
+   assert len(at.tabs) == 7
    ```
-   Then interact with the widgets you touched (`.set_value(...).run()` on selectboxes/pills/multiselects) and re-check `at.exception`. `st.tabs` renders every tab's content on every run regardless of which is visually active, so a single `at.run()` already exercises all tabs — a bug in any tab will surface even if you only meant to touch one.
+   Within Full dashboard mode, `st.tabs` still renders every tab's content on every run regardless of which is visually active, so that one `.run()` call exercises all seven tabs. Then interact with the widgets you touched (`.set_value(...).run()` on selectboxes/pills/multiselects/text_input) in whichever mode(s) they live in, and re-check `at.exception` each time.
 3. **If you don't have `streamlit`/`pandas`/`plotly`/`pydeck` in your active environment**, check for a pre-existing venv before creating one — this machine has one at `/Users/mac-air/Documents/venv/analytics` with everything the app needs.
-4. **Every new number on screen needs an explanation in the Method tab.** If you add a metric, chart, or column, add or extend the matching row in the Method tab's tables (and in README) — self-explanatory is the standard for this dashboard, not just "the query looks right."
-5. **Don't reintroduce hazard-specific duplication.** `priority_map()` is a single parameterised helper (`priority_column`, `tooltip_html`, `layer_id`) used by all three priority maps (heatwave, rainfall, combined) — extend it rather than copy-pasting a fourth near-identical map function. It previously existed in two nearly-identical copies, one of which was missing its `return` statement and silently rendered nothing; keep it consolidated so that class of bug can't recur.
+4. **Every new number on screen needs an explanation.** In Full dashboard, that means a row in the Method tab's tables (and in README). In Simple overview, that means a plain-English sentence in the glossary expander or inline caption — assume the reader has never seen "EMIS code," "PMIU," or "percentile" before. Self-explanatory to a first-time, non-technical visitor is the standard for Simple overview specifically.
+5. **Don't reintroduce hazard-specific duplication.** `priority_map()` is a single parameterised helper (`priority_column`, `tooltip_html`, `layer_id`) used by all four priority maps (heatwave, rainfall, combined, overview) — extend it rather than copy-pasting a fifth near-identical map function. It previously existed in two nearly-identical copies, one of which was missing its `return` statement and silently rendered nothing; keep it consolidated so that class of bug can't recur.
+6. **Keep Simple overview a pure relabeling of existing data.** `render_overview()` must not compute a new classification, threshold, or score — it may only rename, group, or plain-language-translate fields that already exist in `combined` (built once by `build_combined()` and shared by both modes). If a change to risk logic is needed, make it in the shared build functions (`build_combined()` or the SQL scripts) so both modes stay consistent automatically, not by patching `render_overview()` separately. The `PLAIN_PRIORITY` and `PLAIN_HAZARD_EXPOSURE` dicts are the only place plain-language labels are defined — extend them rather than inlining new label strings elsewhere.
 
 ## Style
 

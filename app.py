@@ -106,24 +106,27 @@ def build_combined(heatwave: pd.DataFrame, rainfall: pd.DataFrame) -> pd.DataFra
     shared = ["school_name", "district", "tehsil", "school_level", "school_gender", "latitude", "longitude"]
     hw = heatwave[shared + [
         "emis_code", "total_heatwave_days", "total_heatwave_events", "exposure_class",
-        "essential_service_capacity", "vulnerability_priority",
+        "essential_service_capacity", "vulnerability_priority", "total_enrolment",
     ]].rename(columns={
         "exposure_class": "heatwave_exposure_class",
         "essential_service_capacity": "heatwave_capacity",
         "vulnerability_priority": "heatwave_priority",
+        "total_enrolment": "heatwave_enrolment",
     })
     rf = rainfall[shared + [
         "emis_code", "cumulative_extreme_days", "events_exposed_count", "exposure_class",
-        "rainfall_coping_capacity", "vulnerability_priority",
+        "rainfall_coping_capacity", "vulnerability_priority", "total_enrolment",
     ]].rename(columns={
         "exposure_class": "rainfall_exposure_class",
         "rainfall_coping_capacity": "rainfall_capacity",
         "vulnerability_priority": "rainfall_priority",
+        "total_enrolment": "rainfall_enrolment",
     })
     combined = hw.merge(rf, on="emis_code", how="outer", suffixes=("", "_rf"))
     for column in shared:
         combined[column] = combined[column].combine_first(combined[f"{column}_rf"])
         combined = combined.drop(columns=[f"{column}_rf"])
+    combined["combined_enrolment"] = combined["heatwave_enrolment"].combine_first(combined["rainfall_enrolment"])
 
     combined["hazard_exposure"] = "Unmatched"
     combined.loc[combined["heatwave_priority"].notna(), "hazard_exposure"] = "Heatwave only"
@@ -341,6 +344,154 @@ def school_profile(
         )
 
 
+PLAIN_PRIORITY = {
+    "Priority 1": ("🔴", "Urgent", "Facing frequent extreme weather and the school's water, power, toilets or building condition are weak."),
+    "Priority 2": ("🟠", "High concern", "Facing frequent extreme weather and coping capacity has real gaps."),
+    "Priority 3": ("🟡", "Exposed, but coping", "Facing frequent extreme weather, but the school is comparatively well-equipped."),
+    "Priority 4": ("🔵", "Watch", "Less frequent extreme weather, and coping capacity has some gaps."),
+    "Priority 5": ("⚪", "Lower concern", "Less frequent extreme weather and the school is comparatively well-equipped."),
+    "Unclassified": ("⚫", "Not enough data", "No recent visit recorded the school's water, power, toilet or building condition."),
+}
+PLAIN_HAZARD_EXPOSURE = {
+    "Heatwave and rainfall": "Faces both heatwaves and extreme rainfall",
+    "Heatwave only": "Faces heatwaves (no recorded extreme-rainfall exposure)",
+    "Rainfall only": "Faces extreme rainfall (no recorded heatwave exposure)",
+}
+
+
+def render_school_card(row: pd.Series) -> None:
+    emoji, label, explanation = PLAIN_PRIORITY.get(row["combined_priority"], ("⚫", "Not enough data", ""))
+    with st.container(border=True):
+        st.markdown(f"**{row['school_name']}** — {row['district']}, {row['tehsil']}")
+        st.markdown(f"{emoji} **{label}** · {PLAIN_HAZARD_EXPOSURE.get(row['hazard_exposure'], row['hazard_exposure'])}")
+        st.caption(explanation)
+        with st.expander("See technical details"):
+            st.dataframe(
+                pd.DataFrame([{
+                    "EMIS code": row["emis_code"],
+                    "Heatwave priority": row["heatwave_priority"] if pd.notna(row["heatwave_priority"]) else "Not exposed",
+                    "Rainfall priority": row["rainfall_priority"] if pd.notna(row["rainfall_priority"]) else "Not exposed",
+                    "Combined priority": row["combined_priority"],
+                    "Compounding high risk": bool(row["compounding_high_risk"]),
+                    "Enrolment (most recent record)": row["combined_enrolment"],
+                }]),
+                hide_index=True,
+            )
+            st.caption("Full history for this school, including every monitoring visit, is in Full dashboard → School profile.")
+
+
+def render_overview(combined_df: pd.DataFrame) -> None:
+    st.markdown(
+        "This page tracks how government schools in Punjab are affected by two kinds of extreme weather — "
+        "**heatwaves** and **extreme rainfall** — using official school-visit records matched to weather data "
+        "from 2021 onward. It shows which schools are most exposed, how well-equipped they are to cope, and "
+        "where the two hazards compound each other."
+    )
+    if combined_df.empty:
+        st.warning("No schools match the current sidebar filters. Clear a filter to see results.", icon=":material/filter_alt_off:")
+        return
+
+    urgent = combined_df["combined_priority"].isin(["Priority 1", "Priority 2"]).sum()
+    compounding = combined_df["compounding_high_risk"].sum()
+    students = combined_df["combined_enrolment"].sum()
+    with st.container(horizontal=True):
+        st.metric("Schools tracked here", f"{len(combined_df):,}", border=True)
+        st.metric("Students in schools with any climate exposure", f"{students:,.0f}", border=True)
+        st.metric("Schools needing urgent attention", f"{urgent:,}", border=True)
+        st.metric("Schools facing both hazards at once", f"{compounding:,}", border=True)
+    st.caption(
+        "\"Urgent\" and \"high concern\" combine how often a school faces extreme weather with how well-equipped "
+        "it is to cope, based on its most recent government visit. See the glossary below for exact definitions."
+    )
+
+    st.subheader(":material/search: Look up a school")
+    query = st.text_input(
+        "Type a school name", placeholder="e.g. Government Girls High School Model Town", key="overview_school_search",
+        label_visibility="collapsed",
+    )
+    if query:
+        matches = combined_df[combined_df["school_name"].str.contains(query, case=False, na=False)]
+        if matches.empty:
+            st.caption("No school matched that name in the current sidebar selection. Try a shorter search, or clear the district/level filters.")
+        else:
+            st.caption(f"Showing {min(len(matches), 8):,} of {len(matches):,} matches.")
+            for _, row in matches.head(8).iterrows():
+                render_school_card(row)
+
+    st.subheader(":material/map: Where the risk is")
+    st.caption(
+        "Every dot is a school that has faced at least one heatwave or extreme-rainfall event since 2021. "
+        "Colour shows combined priority — how urgently the school needs attention."
+    )
+    with st.container(horizontal=True, gap="small"):
+        for priority, (emoji, label, _) in PLAIN_PRIORITY.items():
+            st.badge(f"{label}", icon=":material/circle:", color={
+                "Priority 1": "red", "Priority 2": "orange", "Priority 3": "orange",
+                "Priority 4": "blue", "Priority 5": "gray", "Unclassified": "gray",
+            }[priority])
+    overview_tooltip = (
+        "<b>{school_name}</b><br/>{district}<br/>{combined_priority}"
+        "<br/>Heatwave: {heatwave_priority}<br/>Rainfall: {rainfall_priority}"
+    )
+    st.pydeck_chart(
+        priority_map(combined_df, "combined_priority", overview_tooltip, "overview_priority_schools"),
+        height=480, key="overview_priority_map",
+    )
+
+    st.subheader(":material/location_city: Districts needing the most attention")
+    district_summary = combined_df.groupby("district", dropna=False).agg(
+        urgent_schools=("combined_priority", lambda s: s.isin(["Priority 1", "Priority 2"]).sum()),
+    ).reset_index().sort_values("urgent_schools", ascending=False).head(10)
+    st.plotly_chart(
+        px.bar(district_summary.sort_values("urgent_schools"), x="urgent_schools", y="district", orientation="h",
+            color="urgent_schools", color_continuous_scale="YlOrRd",
+            labels={"urgent_schools": "Schools needing urgent attention", "district": "District"},
+            title="Top 10 districts by urgent-attention school count")
+        .update_layout(margin=dict(l=10, r=10, t=55, b=10)),
+        width="stretch",
+    )
+
+    st.subheader(":material/help: What do these hazards mean?")
+    hazard_left, hazard_right = st.columns(2)
+    with hazard_left:
+        with st.container(border=True):
+            st.markdown("#### 🌡️ Heatwaves")
+            st.write(
+                "Runs of unusually hot days for the local area — hotter than about 95% of days that area normally "
+                "sees. Long heatwaves make classrooms unsafe, especially where a school has no reliable electricity "
+                "or drinking water to help students and teachers cope."
+            )
+    with hazard_right:
+        with st.container(border=True):
+            st.markdown("#### 🌧️ Extreme rainfall")
+            st.write(
+                "Days or short spells of rainfall far above what an area normally sees. It can damage buildings, "
+                "flood classrooms and toilets, and cut off the path to school — especially where drainage, "
+                "sanitation and safe water are already weak."
+            )
+
+    with st.expander(":material/menu_book: Glossary — what the terms on this page mean"):
+        st.dataframe(
+            pd.DataFrame([
+                ["EMIS code", "The government's unique ID number for a school."],
+                ["Government visit (PMIU)", "A field visit by government monitoring staff that records a school's enrolment, classrooms, toilets, electricity and water."],
+                ["Exposure", "How often and how severely a school has experienced the hazard since 2021."],
+                ["Coping capacity", "How well-equipped the school was, at its most recent relevant visit, to handle that stress — its water, power, toilets, classrooms and (for rainfall) building cleanliness."],
+                ["Priority", "Exposure combined with coping capacity, from Urgent (frequent exposure + weak capacity) to Lower concern (infrequent exposure + strong capacity)."],
+                ["Compounding risk", "A school independently at Urgent or High concern for both heatwave and extreme rainfall — not just the worse of the two."],
+                ["Not enough data", "No recent government visit recorded the facts needed to judge coping capacity. This is a data gap, not a sign the school is safe."],
+            ], columns=["Term", "Meaning"]),
+            hide_index=True, height=280, row_height=44,
+            column_config={"Term": st.column_config.TextColumn(width="small")},
+        )
+
+    st.info(
+        "This is a simplified view. For every underlying number, event date, individual school history, and the full "
+        "calculation methodology, switch to **🔬 Full dashboard** at the top of the page.",
+        icon=":material/info:",
+    )
+
+
 REQUIRED_FILES = [
     CUMULATIVE_FILE, YEARLY_FILE, RAINFALL_SCHOOLS_FILE, RAINFALL_EVENTS_FILE, RAINFALL_EVENT_GROUPS_FILE,
     RAINFALL_CUMULATIVE_FILE, RAINFALL_YEARLY_FILE,
@@ -356,682 +507,695 @@ rainfall_events, rainfall_event_groups = load_rainfall_events()
 rainfall_cumulative = load_rainfall_cumulative()
 rainfall_yearly = load_rainfall_yearly()
 
-st.title(":material/map: School exposure atlas")
-st.caption("Punjab school exposure to heatwaves and extreme rainfall, with heatwave-year monitoring context where available.")
+st.title(":material/public: Punjab school climate risk")
+st.caption("How heatwaves and extreme rainfall affect government schools in Punjab, 2021 onward — and which schools need attention.")
+
+view_mode = st.segmented_control(
+    "Dashboard mode",
+    ["🏠 Simple overview", "🔬 Full dashboard"],
+    default="🏠 Simple overview",
+    key="view_mode",
+    label_visibility="collapsed",
+)
+if view_mode is None:
+    view_mode = "🏠 Simple overview"
 
 st.sidebar.header(":material/tune: Filters")
 districts = select_values("District", cumulative["district"], "district")
 levels = select_values("School level", cumulative["school_level"], "level")
-st.sidebar.caption("Filters apply to both views. The annual view also has a year filter.")
+st.sidebar.caption("Filters apply everywhere, in both Simple overview and Full dashboard mode.")
 
 cum = apply_filters(cumulative, districts, levels)
 annual = apply_filters(yearly, districts, levels)
 rain_cap = apply_filters(rainfall_cumulative, districts, levels)
 combined = apply_filters(build_combined(cumulative, rainfall_cumulative), districts, levels)
 
-tab_combined, tab_overview, tab_cumulative, tab_annual, tab_rainfall, tab_profile, tab_notes = st.tabs([
-    ":material/public: Combined hazards",
-    ":material/dashboard: Heatwave decision view", ":material/monitoring: Heatwave cumulative view",
-    ":material/calendar_month: Heatwave school-year view", ":material/water_drop: Rainfall exposure & priority",
-    ":material/school: School profile", ":material/info: Method",
-])
+if view_mode == "🏠 Simple overview":
+    render_overview(combined)
+else:
+    tab_combined, tab_overview, tab_cumulative, tab_annual, tab_rainfall, tab_profile, tab_notes = st.tabs([
+        ":material/public: Combined hazards",
+        ":material/dashboard: Heatwave decision view", ":material/monitoring: Heatwave cumulative view",
+        ":material/calendar_month: Heatwave school-year view", ":material/water_drop: Rainfall exposure & priority",
+        ":material/school: School profile", ":material/info: Method",
+    ])
 
-with tab_combined:
-    st.caption(
-        "Every school exposed to at least one recorded hazard (heatwave or extreme rainfall), 2021–2026. "
-        "Combined priority takes the more severe of the two hazard-specific priorities per school; it does not average them."
-    )
-    both_count = (combined["hazard_exposure"] == "Heatwave and rainfall").sum()
-    compounding_count = combined["compounding_high_risk"].sum()
-    combined_urgent = combined["combined_priority"].isin(["Priority 1", "Priority 2"]).sum()
-    with st.container(horizontal=True):
-        st.metric("Schools exposed to at least one hazard", f"{len(combined):,}", border=True)
-        st.metric("Exposed to both heatwave and rainfall", f"{both_count:,}", border=True)
-        st.metric("Compounding high risk (Priority 1–2 in both)", f"{compounding_count:,}", border=True)
-        st.metric("Combined Priority 1–2 schools", f"{combined_urgent:,}", border=True)
-
-    st.subheader("Hazard overlap")
-    st.caption("How many exposed schools face one hazard versus both, in the current filter selection.")
-    left, right = st.columns([1, 1.4])
-    with left:
-        overlap = combined["hazard_exposure"].value_counts().reindex(
-            ["Heatwave and rainfall", "Heatwave only", "Rainfall only"], fill_value=0
-        ).rename_axis("hazard_exposure").reset_index(name="schools")
-        st.plotly_chart(
-            px.bar(overlap, x="hazard_exposure", y="schools", color="hazard_exposure", text="schools",
-                title="Schools by hazard overlap", color_discrete_sequence=px.colors.qualitative.Safe)
-            .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)),
-            width="stretch",
+    with tab_combined:
+        st.caption(
+            "Every school exposed to at least one recorded hazard (heatwave or extreme rainfall), 2021–2026. "
+            "Combined priority takes the more severe of the two hazard-specific priorities per school; it does not average them."
         )
-    with right:
-        district_overlap = combined.groupby("district", dropna=False).agg(
-            schools=("emis_code", "size"),
-            both_hazards=("hazard_exposure", lambda s: (s == "Heatwave and rainfall").sum()),
-            compounding=("compounding_high_risk", "sum"),
-        ).reset_index().sort_values("compounding", ascending=False).head(15)
-        st.plotly_chart(
-            px.bar(district_overlap, x="compounding", y="district", orientation="h",
-                title="Most compounding-risk schools by district (top 15)",
-                color="compounding", color_continuous_scale="YlOrRd",
-                labels={"compounding": "Compounding-risk schools", "district": "District"})
-            .update_layout(margin=dict(l=10, r=10, t=55, b=10)),
-            width="stretch",
-        )
-
-    st.subheader("Combined vulnerability priority")
-    st.caption(
-        "Priority is the more severe of the heatwave and rainfall priorities for each school. "
-        "'Unclassified' means neither hazard-specific priority could be determined (usually missing PMIU capacity data)."
-    )
-    combined_priority_counts = combined["combined_priority"].value_counts()
-    combined_priorities = st.pills(
-        "Map priority legend",
-        COMBINED_PRIORITY_OPTIONS,
-        selection_mode="multi",
-        format_func=lambda priority: f"{COMBINED_PRIORITY_LABELS[priority]} ({combined_priority_counts.get(priority, 0):,})",
-        key="combined_priority_map_filter",
-    )
-    combined_map_schools = (
-        combined[combined["combined_priority"].isin(combined_priorities)] if combined_priorities else combined
-    )
-    combined_tooltip = (
-        "<b>{school_name}</b><br/>{district}<br/>{combined_priority} (driver: {combined_priority_driver})"
-        "<br/>Heatwave: {heatwave_priority}<br/>Rainfall: {rainfall_priority}"
-    )
-    st.pydeck_chart(
-        priority_map(combined_map_schools, "combined_priority", combined_tooltip, "combined_priority_schools"),
-        height=520, key="combined_priority_map",
-    )
-    st.caption(f"Showing {len(combined_map_schools):,} schools on the map.")
-
-    combined_shortlist = combined.sort_values(
-        ["combined_priority_number", "compounding_high_risk", "school_name"],
-        ascending=[True, False, True], na_position="last",
-    ).head(100)
-    with st.container(border=True):
-        st.subheader("Compounding-risk shortlist")
-        st.caption("The first 100 schools after applying the current filters, ordered by combined priority and compounding risk.")
-        st.dataframe(
-            combined_shortlist[[
-                "school_name", "district", "tehsil", "hazard_exposure", "heatwave_priority", "rainfall_priority",
-                "combined_priority", "compounding_high_risk",
-            ]],
-            hide_index=True, height=360,
-            column_config={
-                "hazard_exposure": "Hazard exposure",
-                "heatwave_priority": "Heatwave priority",
-                "rainfall_priority": "Rainfall priority",
-                "combined_priority": "Combined priority",
-                "compounding_high_risk": st.column_config.CheckboxColumn("Compounding"),
-            },
-        )
-    st.download_button(
-        "Download combined hazard data", combined.to_csv(index=False).encode("utf-8"),
-        "filtered_combined_hazard_vulnerability.csv", "text/csv",
-    )
-    st.info(
-        "This is a two-hazard overlay (heatwave × rainfall), not the full Workstream 3 composite risk index. It does not "
-        "include district-level SES, population density or poverty proxies, or Workstream 2's observed enrolment "
-        "sensitivity — none of that data is available in this repository yet.",
-        icon=":material/info:",
-    )
-
-with tab_overview:
-    urgent = cum["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
-    high = (cum["exposure_class"] == "High").sum()
-    missing = (cum["monitoring_visit_status"] != "heatwave-year visit selected").sum()
-    with st.container(horizontal=True):
-        st.metric("Priority 1–2 schools", f"{urgent:,}", border=True)
-        st.metric("High-exposure schools", f"{high:,}", border=True)
-        st.metric("No heatwave-year visit", f"{missing:,}", border=True)
-        st.metric("Schools in selection", f"{len(cum):,}", border=True)
-
-    st.subheader("Priority schools at a glance")
-    st.caption("Select one or more priorities to filter the map. No selection shows all schools; hover over a point for details.")
-    map_counts = cum["vulnerability_priority"].value_counts()
-    map_priorities = st.pills(
-        "Map priority legend",
-        PRIORITY_OPTIONS,
-        selection_mode="multi",
-        format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({map_counts.get(priority, 0):,})",
-        key="map_priority_filter",
-    )
-    map_schools = cum[cum["vulnerability_priority"].isin(map_priorities)] if map_priorities else cum
-    heatwave_tooltip = "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>{total_heatwave_days} heatwave days"
-    st.pydeck_chart(priority_map(map_schools, "vulnerability_priority", heatwave_tooltip, "heatwave_priority_schools"), height=520, key="priority_map")
-    st.caption(f"Showing {len(map_schools):,} schools on the map.")
-
-    shortlist = cum.assign(
-        _priority_order=cum["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
-    ).sort_values(["_priority_order", "priority_rank", "total_heatwave_days"], na_position="last").head(100)
-    with st.container(border=True):
-        st.subheader("Priority school shortlist")
-        st.caption("The first 100 schools after applying the current filters, ordered by the existing priority rank.")
-        st.dataframe(
-            shortlist[["priority_rank", "school_name", "district", "tehsil", "total_heatwave_days", "essential_service_capacity", "monitoring_date_used", "monitoring_visit_status"]],
-            hide_index=True, height=360,
-            column_config={
-                "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
-                "total_heatwave_days": st.column_config.NumberColumn("Heatwave days", format="%.0f"),
-                "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
-                "monitoring_visit_status": "Monitoring status",
-            },
-        )
-
-with tab_cumulative:
-    cumulative_counts = cum["vulnerability_priority"].value_counts()
-    priorities = st.pills(
-        "Filter cumulative view by priority",
-        PRIORITY_OPTIONS,
-        selection_mode="multi",
-        format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({cumulative_counts.get(priority, 0):,})",
-        key="cumulative_priority_filter",
-        help="Select one or more priorities. No selection includes every category.",
-    )
-    if priorities:
-        cum = cum[cum["vulnerability_priority"].isin(priorities)]
-
-    urgent = cum["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
-    available = cum["monitoring_date_used"].notna().sum()
-    with st.container(horizontal=True):
-        st.metric("Schools", f"{len(cum):,}", border=True)
-        st.metric("Average heatwave days", f"{cum['total_heatwave_days'].mean():.1f}" if len(cum) else "—", border=True)
-        st.metric("Priority 1 or 2", f"{urgent:,}", border=True)
-        st.metric("Monitoring record available", f"{available:,}", border=True)
-
-    left, right = st.columns(2)
-    with left:
-        priority = cum["vulnerability_priority"].fillna("Unclassified - PMIU missing").value_counts().reindex(PRIORITY_OPTIONS, fill_value=0)
-        priority = priority.rename_axis("priority").reset_index(name="schools")
-        priority["priority"] = priority["priority"].replace({"Unclassified - PMIU missing": "Unclassified"})
-        st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
-            title="Schools by vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
-            .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
-    with right:
-        district_summary = cum.groupby("district", dropna=False).agg(
-            schools=("emis_code", "size"), mean_heatwave_days=("total_heatwave_days", "mean")
-        ).reset_index().sort_values("mean_heatwave_days", ascending=False).head(15)
-        st.plotly_chart(px.bar(district_summary, x="mean_heatwave_days", y="district", orientation="h",
-            color="mean_heatwave_days", title="Highest average exposure by district (top 15)",
-            color_continuous_scale="YlOrRd").update_layout(margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
-
-    pressure = cum[
-        cum["vulnerability_priority"].isin(["Priority 1", "Priority 2", "Priority 3"])
-    ].dropna(subset=["students_per_classroom"]).nlargest(20, "students_per_classroom")
-    with st.container(border=True):
-        st.subheader("Highest classroom pressure among Priority 1–3 schools")
-        st.caption("This ranking highlights schools that combine high or moderate heatwave vulnerability with the highest observed number of students per usable classroom. It does not apply an external overcrowding threshold.")
-        if pressure.empty:
-            st.caption("No Priority 1–3 schools with a valid classroom count match the current filters.")
-        else:
-            st.plotly_chart(px.bar(pressure.sort_values("students_per_classroom"), x="students_per_classroom", y="school_name",
-                orientation="h", color="total_heatwave_days", color_continuous_scale="YlOrRd",
-                hover_data=["district", "tehsil", "functional_toilets", "students_per_functional_toilet", "monitoring_date_used"],
-                labels={"students_per_classroom": "Students per usable classroom", "school_name": "School", "total_heatwave_days": "Heatwave days"})
-                .update_layout(margin=dict(l=10, r=10, t=30, b=10), yaxis={"categoryorder": "total ascending"}), width="stretch")
-
-    display_columns = ["emis_code", "school_name", "district", "tehsil", "total_heatwave_days", "total_heatwave_events",
-                       "monitoring_date_used", "monitoring_visit_status", "students_per_classroom", "students_per_functional_toilet",
-                       "essential_service_capacity", "vulnerability_priority", "data_quality_flag"]
-    st.dataframe(cum[display_columns], hide_index=True, height=420, column_config={
-        "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
-    })
-    st.download_button("Download filtered cumulative data", cum.to_csv(index=False).encode("utf-8"),
-        "filtered_cumulative_school_vulnerability.csv", "text/csv")
-
-with tab_annual:
-    years = sorted(annual["event_year"].dropna().unique())
-    selected_year = st.selectbox("Heatwave year", years, index=len(years) - 1)
-    annual = annual[annual["event_year"] == selected_year]
-    monitored = annual["monitoring_date_used"].notna().sum()
-    weak = (annual["essential_service_capacity"] == "Weak").sum()
-    with st.container(horizontal=True):
-        st.metric("School-year records", f"{len(annual):,}", border=True)
-        st.metric("Monitoring record available", f"{monitored:,}", border=True)
-        st.metric("Average heatwave days", f"{annual['total_heatwave_days_year'].mean():.1f}" if len(annual) else "—", border=True)
-        st.metric("Weak service capacity", f"{weak:,}", border=True)
-
-    left, right = st.columns(2)
-    with left:
-        st.plotly_chart(capacity_chart(annual, "essential_service_capacity", "Essential-service capacity"), width="stretch")
-    with right:
-        district_summary = annual.groupby("district", dropna=False).agg(
-            schools=("emis_code", "size"), mean_heatwave_days=("total_heatwave_days_year", "mean")
-        ).reset_index().sort_values("mean_heatwave_days", ascending=False).head(15)
-        st.plotly_chart(px.bar(district_summary, x="mean_heatwave_days", y="district", orientation="h",
-            title="Highest average exposure by district (top 15)", color="mean_heatwave_days", color_continuous_scale="YlOrRd")
-            .update_layout(margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
-
-    with st.container(border=True):
-        st.subheader("School priority ranking")
-        st.caption("Choose one measure to identify the 20 schools that most need review in the selected heatwave year. Hover over a bar for the selected heatwave event and monitoring visit date.")
-        ranking_choice = st.segmented_control(
-            "Rank schools by",
-            ["Selected-event heatwave days", "Classroom pressure", "Toilet pressure"],
-            default="Selected-event heatwave days",
-            key="annual_ranking_choice",
-        )
-        ranking_fields = {
-            "Selected-event heatwave days": ("selected_event_heatwave_days", "Heatwave days during selected event"),
-            "Classroom pressure": ("students_per_classroom", "Students per usable classroom"),
-            "Toilet pressure": ("students_per_functional_toilet", "Students per functional toilet"),
-        }
-        ranking_field, ranking_label = ranking_fields[ranking_choice]
-        ranked_schools = annual.dropna(subset=[ranking_field]).nlargest(20, ranking_field)
-        st.plotly_chart(px.bar(
-            ranked_schools.sort_values(ranking_field), x=ranking_field, y="school_name", orientation="h",
-            color="essential_service_capacity", hover_data=["district", "tehsil", "selected_event_code", "monitoring_date_used", "days_from_selected_event_start", "total_enrolment"],
-            labels={ranking_field: ranking_label, "school_name": "School", "essential_service_capacity": "Service capacity"},
-            title=f"Top 20 schools by {ranking_label.lower()}", color_discrete_sequence=px.colors.qualitative.Safe,
-        ).update_layout(margin=dict(l=10, r=10, t=50, b=10), yaxis={"categoryorder": "total ascending"}), width="stretch")
-    display_columns = ["emis_code", "school_name", "district", "tehsil", "event_year", "total_heatwave_days_year",
-                       "selected_event_code", "monitoring_date_used", "days_from_selected_event_start", "total_enrolment",
-                       "students_per_classroom", "students_per_functional_toilet", "essential_service_capacity", "data_quality_flag"]
-    st.dataframe(annual[display_columns], hide_index=True, height=420, column_config={
-        "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
-    })
-    st.download_button("Download filtered school-year data", annual.to_csv(index=False).encode("utf-8"),
-        f"filtered_school_year_heatwave_capacity_{selected_year}.csv", "text/csv")
-
-with tab_rainfall:
-    rain = apply_filters(rainfall_schools, districts, levels)
-    rain_groups = apply_filters(rainfall_event_groups, districts, levels)
-    event_rollup = rain_groups.groupby(
-        ["event_code", "event_type", "event_start_date", "event_end_date"], dropna=False
-    ).agg(
-        schools_in_universe=("schools_in_universe", "sum"),
-        schools_exposed=("schools_exposed", "sum"),
-        enrolled_students_exposed=("enrolled_students_exposed", "sum"),
-        maximum_daily_rainfall_mm_exposed=("maximum_daily_rainfall_mm_exposed", "max"),
-        maximum_3day_rainfall_mm_exposed=("maximum_3day_rainfall_mm_exposed", "max"),
-    ).reset_index()
-    event_rollup["schools_exposed_percent"] = event_rollup["schools_exposed"] * 100 / event_rollup["schools_in_universe"]
-    event_rollup = event_rollup.sort_values("event_start_date")
-
-    st.caption("Workstream 1: 46 extreme-rainfall events, 2021–2025. Enrolment is the school record supplied with the exposure data; it is not a measure of enrolment disruption.")
-    ever_exposed = rain["ever_exposed_to_extreme_rainfall"].eq(1)
-    with st.container(horizontal=True):
-        st.metric("Schools in selection", f"{len(rain):,}", border=True)
-        st.metric("Ever exposed", f"{ever_exposed.sum():,}", border=True)
-        st.metric("High exposure", f"{rain['exposure_class'].eq('High').sum():,}", border=True)
-        st.metric("Students at ever-exposed schools", f"{rain.loc[ever_exposed, 'total_enrolment'].sum():,.0f}", border=True)
-
-    st.subheader("Where schools have experienced extreme rainfall")
-    exposure_classes = ["High", "Moderate", "Low", "No recorded exposure"]
-    selected_classes = st.pills(
-        "Exposure class on map", exposure_classes, selection_mode="multi", key="rainfall_map_exposure_class",
-        help="Select one or more classes. No selection shows all schools.",
-    )
-    st.caption("Map legend — colours show cumulative rainfall exposure; the pills above filter the displayed points.")
-    with st.container(horizontal=True, gap="small"):
-        st.badge("High · above the 67th percentile", icon=":material/circle:", color="red")
-        st.badge("Moderate · 33rd–67th percentile", icon=":material/circle:", color="orange")
-        st.badge("Low · at or below the 33rd percentile", icon=":material/circle:", color="yellow")
-        st.badge("No recorded exposure", icon=":material/circle:", color="gray")
-    rainfall_map_schools = rain[rain["exposure_class"].isin(selected_classes)] if selected_classes else rain
-    st.pydeck_chart(rainfall_exposure_map(rainfall_map_schools), height=520, key="rainfall_exposure_map")
-    st.caption(f"Showing {len(rainfall_map_schools):,} schools. High, moderate and low classes use percentile cut-offs among schools exposed at least once.")
-
-    st.subheader("When extreme-rainfall events affected schools")
-    if event_rollup.empty:
-        st.warning("No rainfall events match the current district and school-level filters.", icon=":material/filter_alt_off:")
-    else:
-        event_labels = {
-            row.event_code: f"{row.event_start_date:%d %b %Y} · {row.event_code} · {row.event_type}"
-            for row in event_rollup.itertuples()
-        }
-        selected_event_code = st.selectbox("Rainfall event", event_rollup["event_code"], format_func=event_labels.get)
-        selected_event = event_rollup.loc[event_rollup["event_code"] == selected_event_code].iloc[0]
+        both_count = (combined["hazard_exposure"] == "Heatwave and rainfall").sum()
+        compounding_count = combined["compounding_high_risk"].sum()
+        combined_urgent = combined["combined_priority"].isin(["Priority 1", "Priority 2"]).sum()
         with st.container(horizontal=True):
-            st.metric("Schools exposed", f"{selected_event['schools_exposed']:,.0f}", border=True)
-            st.metric("Share of selection", f"{selected_event['schools_exposed_percent']:.1f}%", border=True)
-            st.metric("Students at exposed schools", f"{selected_event['enrolled_students_exposed']:,.0f}", border=True)
-            st.metric("Maximum 3-day rainfall", f"{selected_event['maximum_3day_rainfall_mm_exposed']:.1f} mm", border=True)
+            st.metric("Schools exposed to at least one hazard", f"{len(combined):,}", border=True)
+            st.metric("Exposed to both heatwave and rainfall", f"{both_count:,}", border=True)
+            st.metric("Compounding high risk (Priority 1–2 in both)", f"{compounding_count:,}", border=True)
+            st.metric("Combined Priority 1–2 schools", f"{combined_urgent:,}", border=True)
 
-        event_breakdown = rain_groups[rain_groups["event_code"] == selected_event_code].groupby(
-            ["school_level", "school_gender"], dropna=False
-        ).agg(
-            schools_exposed=("schools_exposed", "sum"),
-            enrolled_students_exposed=("enrolled_students_exposed", "sum"),
-        ).reset_index()
-        event_measure = st.segmented_control(
-            "Break down the selected event by", ["Schools exposed", "Students at exposed schools"],
-            default="Schools exposed", key="rainfall_event_measure",
-        )
-        event_measure_column = "schools_exposed" if event_measure == "Schools exposed" else "enrolled_students_exposed"
-        left, right = st.columns(2)
+        st.subheader("Hazard overlap")
+        st.caption("How many exposed schools face one hazard versus both, in the current filter selection.")
+        left, right = st.columns([1, 1.4])
         with left:
+            overlap = combined["hazard_exposure"].value_counts().reindex(
+                ["Heatwave and rainfall", "Heatwave only", "Rainfall only"], fill_value=0
+            ).rename_axis("hazard_exposure").reset_index(name="schools")
             st.plotly_chart(
-                px.bar(event_rollup, x="schools_exposed", y="event_code", orientation="h", color="event_type",
-                    hover_data=["event_start_date", "event_end_date", "schools_exposed_percent", "enrolled_students_exposed"],
-                    labels={"schools_exposed": "Schools exposed", "event_code": "Rainfall event"},
-                    title="All 46 rainfall events")
-                .update_layout(margin=dict(l=10, r=10, t=55, b=10), yaxis={"categoryorder": "total ascending"}),
+                px.bar(overlap, x="hazard_exposure", y="schools", color="hazard_exposure", text="schools",
+                    title="Schools by hazard overlap", color_discrete_sequence=px.colors.qualitative.Safe)
+                .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)),
                 width="stretch",
             )
         with right:
+            district_overlap = combined.groupby("district", dropna=False).agg(
+                schools=("emis_code", "size"),
+                both_hazards=("hazard_exposure", lambda s: (s == "Heatwave and rainfall").sum()),
+                compounding=("compounding_high_risk", "sum"),
+            ).reset_index().sort_values("compounding", ascending=False).head(15)
             st.plotly_chart(
-                px.bar(event_breakdown, x=event_measure_column, y="school_level", color="school_gender", barmode="group",
-                    labels={event_measure_column: event_measure, "school_level": "School level", "school_gender": "School gender"},
-                    title="Selected event by school level and gender")
+                px.bar(district_overlap, x="compounding", y="district", orientation="h",
+                    title="Most compounding-risk schools by district (top 15)",
+                    color="compounding", color_continuous_scale="YlOrRd",
+                    labels={"compounding": "Compounding-risk schools", "district": "District"})
                 .update_layout(margin=dict(l=10, r=10, t=55, b=10)),
                 width="stretch",
             )
 
-        st.dataframe(
-            event_rollup[["event_code", "event_type", "event_start_date", "event_end_date", "schools_exposed", "schools_exposed_percent", "enrolled_students_exposed", "maximum_daily_rainfall_mm_exposed", "maximum_3day_rainfall_mm_exposed"]],
-            hide_index=True, height=360,
-            column_config={
-                "event_start_date": st.column_config.DateColumn("Start", format="DD MMM YYYY"),
-                "event_end_date": st.column_config.DateColumn("End", format="DD MMM YYYY"),
-                "schools_exposed_percent": st.column_config.NumberColumn("Schools exposed", format="%.1f%%"),
-                "enrolled_students_exposed": st.column_config.NumberColumn("Students at exposed schools", format="%.0f"),
-                "maximum_daily_rainfall_mm_exposed": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
-                "maximum_3day_rainfall_mm_exposed": st.column_config.NumberColumn("Maximum 3-day rainfall (mm)", format="%.1f"),
-            },
-        )
-
-    st.subheader("School-level cumulative rainfall exposure")
-    rainfall_table = rain.sort_values(["rainfall_exposure_score", "events_exposed_count"], ascending=False)
-    st.dataframe(
-        rainfall_table[["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class"]],
-        hide_index=True, height=420,
-        column_config={
-            "event_exposure_frequency_percent": st.column_config.NumberColumn("Event exposure", format="%.1f%%"),
-            "rainfall_exposure_score": st.column_config.NumberColumn("Exposure score", format="%.1f"),
-            "maximum_daily_rainfall_mm": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
-            "maximum_3day_rainfall_mm": st.column_config.NumberColumn("Maximum 3-day rainfall (mm)", format="%.1f"),
-        },
-    )
-    st.download_button(
-        "Download filtered rainfall school data", rainfall_table.to_csv(index=False).encode("utf-8"),
-        "filtered_punjab_school_rainfall_exposure.csv", "text/csv",
-    )
-
-    st.subheader("Rainfall coping-capacity priority")
-    st.caption(
-        "Combines each school's cumulative rainfall exposure with PMIU-visit proxies for structural condition, "
-        "learning-space continuity, sanitation and safe water. Sewerage/drainage is not scored — free-text mentions "
-        "cover under 1% of visits. Uses the PMIU visit closest to one of the school's own extreme-rainfall events, "
-        "matched by calendar year, the same nearest-visit rule used for heatwave."
-    )
-    rain_priority_counts = rain_cap["vulnerability_priority"].value_counts()
-    urgent_rain = rain_cap["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
-    weak_capacity = (rain_cap["rainfall_coping_capacity"] == "Weak").sum()
-    with st.container(horizontal=True):
-        st.metric("Exposed schools with a priority", f"{len(rain_cap):,}", border=True)
-        st.metric("Priority 1–2 schools", f"{urgent_rain:,}", border=True)
-        st.metric("Weak coping capacity", f"{weak_capacity:,}", border=True)
-        st.metric("No PMIU capacity match", f"{rain_priority_counts.get('Unclassified - capacity data missing', 0):,}", border=True)
-
-    rain_priorities = st.pills(
-        "Map priority legend",
-        RAINFALL_PRIORITY_OPTIONS,
-        selection_mode="multi",
-        format_func=lambda priority: f"{RAINFALL_PRIORITY_LABELS[priority]} ({rain_priority_counts.get(priority, 0):,})",
-        key="rainfall_priority_map_filter",
-    )
-    rain_map_schools = rain_cap[rain_cap["vulnerability_priority"].isin(rain_priorities)] if rain_priorities else rain_cap
-    rainfall_priority_tooltip = "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>Exposure: {exposure_class} · Capacity: {rainfall_coping_capacity}"
-    st.pydeck_chart(priority_map(rain_map_schools, "vulnerability_priority", rainfall_priority_tooltip, "rainfall_priority_schools"), height=520, key="rainfall_priority_map")
-    st.caption(f"Showing {len(rain_map_schools):,} exposed schools on the map.")
-
-    left, right = st.columns(2)
-    with left:
-        priority = rain_cap["vulnerability_priority"].fillna("Unclassified - capacity data missing").value_counts().reindex(
-            RAINFALL_PRIORITY_OPTIONS, fill_value=0
-        ).rename_axis("priority").reset_index(name="schools")
-        st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
-            title="Exposed schools by rainfall vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
-            .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
-    with right:
-        dimension_choice = st.selectbox("Capacity dimension", list(RAINFALL_CAPACITY_DIMENSIONS.values()), key="rainfall_capacity_dimension")
-        dimension_column = next(key for key, label in RAINFALL_CAPACITY_DIMENSIONS.items() if label == dimension_choice)
-        st.plotly_chart(capacity_chart(rain_cap, dimension_column, dimension_choice), width="stretch")
-
-    rain_shortlist = rain_cap.assign(
-        _priority_order=rain_cap["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
-    ).sort_values(["_priority_order", "priority_rank", "rainfall_exposure_score"], ascending=[True, True, False]).head(100)
-    with st.container(border=True):
-        st.subheader("Priority school shortlist")
-        st.caption("The first 100 exposed schools after applying the current filters, ordered by priority category and rank.")
-        st.dataframe(
-            rain_shortlist[["priority_rank", "school_name", "district", "tehsil", "exposure_class", "rainfall_coping_capacity",
-                             "cumulative_extreme_days", "monitoring_date_used", "monitoring_visit_status"]],
-            hide_index=True, height=360,
-            column_config={
-                "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
-                "cumulative_extreme_days": st.column_config.NumberColumn("Extreme-rainfall days", format="%.0f"),
-                "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
-                "monitoring_visit_status": "Monitoring status",
-                "rainfall_coping_capacity": "Coping capacity",
-            },
-        )
-    st.download_button(
-        "Download rainfall vulnerability priority data", rain_cap.to_csv(index=False).encode("utf-8"),
-        "filtered_school_rainfall_vulnerability_priority.csv", "text/csv",
-    )
-    st.info(
-        "Rainfall-enrolment disruption is not yet estimated here. It requires an event-study design over the "
-        "monthly enrolment panel, matching exposed and unexposed schools around each event.",
-        icon=":material/info:",
-    )
-
-with tab_profile:
-    st.caption(
-        "Search finds schools from the heatwave-exposed population. Service and infrastructure values come from the "
-        "PMIU visit closest to a heatwave (or, in the rainfall section below, an extreme-rainfall event) in the same year."
-    )
-    school_profile(cum, yearly, rainfall_cumulative, rainfall_yearly, "school_profile")
-
-with tab_notes:
-    st.subheader("Method")
-    st.caption("A quick guide to the atlas, its data choices, and the vulnerability-priority logic.")
-
-    with st.container(border=True):
-        st.markdown("#### :material/explore: How to read the atlas")
-        st.caption("Each section answers a different question. Use the sidebar filters to narrow the same school population throughout.")
-        st.dataframe(
-            pd.DataFrame([
-                ["Sidebar filters", "District and school level", "Filters every tab's school-level results, including Combined hazards."],
-                ["Combined hazards: headline metrics", "Schools exposed to at least one hazard, both hazards, and compounding-risk counts", "Start here for a single view of overall climate risk across the two hazards."],
-                ["Combined hazards: overlap", "Bar chart and district ranking of heatwave-only, rainfall-only, and both-hazard schools", "Identifies districts where the two hazards compound rather than just co-occur."],
-                ["Combined hazards: priority map & shortlist", "Schools coloured by combined priority, with the driving hazard in the tooltip", "Use for cross-hazard targeting; drill into a single hazard using the dedicated tabs below."],
-                ["Heatwave decision view: headline metrics", "Counts of exposed, high-exposure, urgent, and unmatched schools", "A quick summary of the current district and level selection, heatwave only."],
-                ["Heatwave decision view: priority map", "School locations coloured by heatwave vulnerability priority", "Use the priority pills to show one or several categories; hover for school details."],
-                ["Heatwave decision view: shortlist", "First 100 schools ordered by priority category and rank", "Use as a review or targeting list, not as a causal-impact ranking."],
-                ["Heatwave cumulative view", "One row per exposed school; heatwave exposure summed across 2021–2026", "Capacity comes from the closest eligible PMIU visit in one of that school's heatwave years."],
-                ["Heatwave cumulative: classroom pressure", "Priority 1–3 schools with the most students per usable classroom", "Highlights schools where heat exposure and observed classroom pressure overlap."],
-                ["Heatwave school-year view", "One row per school and heatwave year", "Uses one PMIU visit: the visit closest to a heatwave in that same year."],
-                ["Heatwave school-year: priority ranking", "Top 20 schools for exposure, classroom pressure, or toilet pressure", "Switch the measure to review different operational pressures."],
-                ["Rainfall exposure & priority", "Punjab exposure across 46 extreme-rainfall events, 2021–2025, plus rainfall vulnerability priority", "Use the event selector for timing and composition; use the priority section for PMIU-linked coping capacity and targeting."],
-                ["School profile: heatwave summary", "Cumulative heatwave exposure and selected school-capacity indicators", "Describes the chosen school using the heatwave cumulative output."],
-                ["School profile: heatwave visit history", "One selected monitoring visit for every exposed heatwave year", "A blank date means no PMIU visit was available in that year."],
-                ["School profile: rainfall section", "Cumulative rainfall exposure, capacity, and rainfall-year visit history for the same school", "Shows 'no recorded exposure' if the selected school was never in an extreme-rainfall footprint."],
-                ["Method", "Definitions, matching rules, and priority construction for both hazards and the combined view", "Use this section when interpreting or reporting dashboard results."],
-            ], columns=["Tab / section", "What it shows", "How to use it"]),
-            hide_index=True,
-            height=940,
-            row_height=52,
-            column_config={
-                "Tab / section": st.column_config.TextColumn(width="medium"),
-                "What it shows": st.column_config.TextColumn(width="large"),
-                "How to use it": st.column_config.TextColumn(width="large"),
-            },
-        )
-
-    with st.container(border=True):
-        st.markdown("#### :material/fact_check: Workstream coverage")
-        st.dataframe(
-            pd.DataFrame([
-                ["Policy Question 1", "Where and when schools are exposed, and the affected school/enrolment counts", "Heatwave and rainfall exposure views support this for Punjab; rainfall is disaggregated by school level and gender."],
-                ["Policy Question 2", "Whether climate events cause enrolment disruption, recovery or persistent decline", "Not yet estimated. This requires a monthly enrolment panel and an exposed-versus-unexposed event-study design."],
-                ["Risk prioritisation", "Which exposed schools also have weak capacity", "Available for heatwave and rainfall. Rainfall capacity uses PMIU-visit proxies (cleanliness, classrooms, toilets, water); no ASC/SIS structural or drainage extract was available, so drainage is excluded."],
-                ["Workstream 3 (compounding exposure)", "Which schools and districts face both hazards at once", "Partial. The Combined hazards tab overlays heatwave and rainfall priority per school, but is not the full Tier A composite index — it has no district-level SES, population density or poverty proxies, and no Workstream 2 sensitivity input."],
-            ], columns=["Question", "Dashboard coverage", "Current status"]),
-            hide_index=True,
-            height=270,
-            row_height=56,
-            column_config={
-                "Question": st.column_config.TextColumn(width="medium"),
-                "Dashboard coverage": st.column_config.TextColumn(width="large"),
-                "Current status": st.column_config.TextColumn(width="large"),
-            },
-        )
-
-    with st.container(border=True):
-        st.markdown("#### :material/public: How the combined hazard view is built")
+        st.subheader("Combined vulnerability priority")
         st.caption(
-            "The Combined hazards tab is a per-school overlay of the two independent hazard-specific priorities below — "
-            "it does not recompute exposure or capacity from scratch."
+            "Priority is the more severe of the heatwave and rainfall priorities for each school. "
+            "'Unclassified' means neither hazard-specific priority could be determined (usually missing PMIU capacity data)."
         )
-        st.dataframe(
-            pd.DataFrame([
-                ["Hazard exposure", "Heatwave only, Rainfall only, or Heatwave and rainfall", "Based on whether the school appears in the heatwave and/or rainfall cumulative vulnerability files."],
-                ["Combined priority", "The more severe (lower-numbered) of the heatwave and rainfall priorities", "Not an average. A school at heatwave Priority 1 and rainfall Priority 4 is shown as combined Priority 1."],
-                ["Combined priority driver", "Which hazard produced the combined priority: Heatwave, Rainfall, or Both (tied)", "Shown in the map tooltip and useful for deciding which single-hazard tab to open next."],
-                ["Compounding high risk", "True when a school is independently Priority 1 or 2 on both heatwave and rainfall", "The clearest signal of a school needing attention on more than one hazard, not just the more severe one."],
-                ["Unclassified", "Neither hazard could assign a numbered priority", "Usually missing PMIU capacity data for both hazards, not evidence of low risk."],
-            ], columns=["Field", "Values", "Rule"]),
-            hide_index=True,
-            height=214,
-            row_height=56,
-            column_config={"Field": st.column_config.TextColumn(width="medium")},
+        combined_priority_counts = combined["combined_priority"].value_counts()
+        combined_priorities = st.pills(
+            "Map priority legend",
+            COMBINED_PRIORITY_OPTIONS,
+            selection_mode="multi",
+            format_func=lambda priority: f"{COMBINED_PRIORITY_LABELS[priority]} ({combined_priority_counts.get(priority, 0):,})",
+            key="combined_priority_map_filter",
+        )
+        combined_map_schools = (
+            combined[combined["combined_priority"].isin(combined_priorities)] if combined_priorities else combined
+        )
+        combined_tooltip = (
+            "<b>{school_name}</b><br/>{district}<br/>{combined_priority} (driver: {combined_priority_driver})"
+            "<br/>Heatwave: {heatwave_priority}<br/>Rainfall: {rainfall_priority}"
+        )
+        st.pydeck_chart(
+            priority_map(combined_map_schools, "combined_priority", combined_tooltip, "combined_priority_schools"),
+            height=520, key="combined_priority_map",
+        )
+        st.caption(f"Showing {len(combined_map_schools):,} schools on the map.")
+
+        combined_shortlist = combined.sort_values(
+            ["combined_priority_number", "compounding_high_risk", "school_name"],
+            ascending=[True, False, True], na_position="last",
+        ).head(100)
+        with st.container(border=True):
+            st.subheader("Compounding-risk shortlist")
+            st.caption("The first 100 schools after applying the current filters, ordered by combined priority and compounding risk.")
+            st.dataframe(
+                combined_shortlist[[
+                    "school_name", "district", "tehsil", "hazard_exposure", "heatwave_priority", "rainfall_priority",
+                    "combined_priority", "compounding_high_risk",
+                ]],
+                hide_index=True, height=360,
+                column_config={
+                    "hazard_exposure": "Hazard exposure",
+                    "heatwave_priority": "Heatwave priority",
+                    "rainfall_priority": "Rainfall priority",
+                    "combined_priority": "Combined priority",
+                    "compounding_high_risk": st.column_config.CheckboxColumn("Compounding"),
+                },
+            )
+        st.download_button(
+            "Download combined hazard data", combined.to_csv(index=False).encode("utf-8"),
+            "filtered_combined_hazard_vulnerability.csv", "text/csv",
         )
         st.info(
-            "This overlay only combines Workstream 1 exposure and capacity for two hazards. It is a simplified stand-in "
-            "for Workstream 3's Tier A composite risk index, which additionally requires observed enrolment sensitivity "
-            "(Workstream 2) and district-level SES/population/poverty proxies — none of which exist in this repository yet.",
+            "This is a two-hazard overlay (heatwave × rainfall), not the full Workstream 3 composite risk index. It does not "
+            "include district-level SES, population density or poverty proxies, or Workstream 2's observed enrolment "
+            "sensitivity — none of that data is available in this repository yet.",
             icon=":material/info:",
         )
 
-    with st.container(border=True):
-        st.markdown("#### :material/account_tree: How heatwave priorities are set")
-        st.caption("Priority is calculated from the full cumulative school dataset before dashboard filters are applied.")
+    with tab_overview:
+        urgent = cum["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
+        high = (cum["exposure_class"] == "High").sum()
+        missing = (cum["monitoring_visit_status"] != "heatwave-year visit selected").sum()
+        with st.container(horizontal=True):
+            st.metric("Priority 1–2 schools", f"{urgent:,}", border=True)
+            st.metric("High-exposure schools", f"{high:,}", border=True)
+            st.metric("No heatwave-year visit", f"{missing:,}", border=True)
+            st.metric("Schools in selection", f"{len(cum):,}", border=True)
 
-        exposure_step, capacity_step = st.columns([1, 1.4], gap="large")
-        with exposure_step:
-            st.badge("Step 1 · Exposure", icon=":material/thermostat:", color="orange")
-            st.markdown("**Cumulative heatwave exposure**")
+        st.subheader("Priority schools at a glance")
+        st.caption("Select one or more priorities to filter the map. No selection shows all schools; hover over a point for details.")
+        map_counts = cum["vulnerability_priority"].value_counts()
+        map_priorities = st.pills(
+            "Map priority legend",
+            PRIORITY_OPTIONS,
+            selection_mode="multi",
+            format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({map_counts.get(priority, 0):,})",
+            key="map_priority_filter",
+        )
+        map_schools = cum[cum["vulnerability_priority"].isin(map_priorities)] if map_priorities else cum
+        heatwave_tooltip = "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>{total_heatwave_days} heatwave days"
+        st.pydeck_chart(priority_map(map_schools, "vulnerability_priority", heatwave_tooltip, "heatwave_priority_schools"), height=520, key="priority_map")
+        st.caption(f"Showing {len(map_schools):,} schools on the map.")
+
+        shortlist = cum.assign(
+            _priority_order=cum["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
+        ).sort_values(["_priority_order", "priority_rank", "total_heatwave_days"], na_position="last").head(100)
+        with st.container(border=True):
+            st.subheader("Priority school shortlist")
+            st.caption("The first 100 schools after applying the current filters, ordered by the existing priority rank.")
             st.dataframe(
-                pd.DataFrame([
-                    ["Low", "14–34 cumulative heatwave days", "At or below the 33rd percentile"],
-                    ["Moderate", "35–38 cumulative heatwave days", "Between the 33rd and 67th percentiles"],
-                    ["High", "39–48 cumulative heatwave days", "Above the 67th percentile"],
-                ], columns=["Class", "Current range", "Rule"]),
-                hide_index=True,
-                height=214,
-                row_height=56,
+                shortlist[["priority_rank", "school_name", "district", "tehsil", "total_heatwave_days", "essential_service_capacity", "monitoring_date_used", "monitoring_visit_status"]],
+                hide_index=True, height=360,
+                column_config={
+                    "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
+                    "total_heatwave_days": st.column_config.NumberColumn("Heatwave days", format="%.0f"),
+                    "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
+                    "monitoring_visit_status": "Monitoring status",
+                },
             )
 
-        with capacity_step:
-            st.badge("Step 2 · School capacity", icon=":material/electric_bolt:", color="blue")
-            st.markdown("**Essential services at the selected PMIU visit**")
+    with tab_cumulative:
+        cumulative_counts = cum["vulnerability_priority"].value_counts()
+        priorities = st.pills(
+            "Filter cumulative view by priority",
+            PRIORITY_OPTIONS,
+            selection_mode="multi",
+            format_func=lambda priority: f"{PRIORITY_LABELS[priority]} ({cumulative_counts.get(priority, 0):,})",
+            key="cumulative_priority_filter",
+            help="Select one or more priorities. No selection includes every category.",
+        )
+        if priorities:
+            cum = cum[cum["vulnerability_priority"].isin(priorities)]
+
+        urgent = cum["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
+        available = cum["monitoring_date_used"].notna().sum()
+        with st.container(horizontal=True):
+            st.metric("Schools", f"{len(cum):,}", border=True)
+            st.metric("Average heatwave days", f"{cum['total_heatwave_days'].mean():.1f}" if len(cum) else "—", border=True)
+            st.metric("Priority 1 or 2", f"{urgent:,}", border=True)
+            st.metric("Monitoring record available", f"{available:,}", border=True)
+
+        left, right = st.columns(2)
+        with left:
+            priority = cum["vulnerability_priority"].fillna("Unclassified - PMIU missing").value_counts().reindex(PRIORITY_OPTIONS, fill_value=0)
+            priority = priority.rename_axis("priority").reset_index(name="schools")
+            priority["priority"] = priority["priority"].replace({"Unclassified - PMIU missing": "Unclassified"})
+            st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
+                title="Schools by vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
+                .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
+        with right:
+            district_summary = cum.groupby("district", dropna=False).agg(
+                schools=("emis_code", "size"), mean_heatwave_days=("total_heatwave_days", "mean")
+            ).reset_index().sort_values("mean_heatwave_days", ascending=False).head(15)
+            st.plotly_chart(px.bar(district_summary, x="mean_heatwave_days", y="district", orientation="h",
+                color="mean_heatwave_days", title="Highest average exposure by district (top 15)",
+                color_continuous_scale="YlOrRd").update_layout(margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
+
+        pressure = cum[
+            cum["vulnerability_priority"].isin(["Priority 1", "Priority 2", "Priority 3"])
+        ].dropna(subset=["students_per_classroom"]).nlargest(20, "students_per_classroom")
+        with st.container(border=True):
+            st.subheader("Highest classroom pressure among Priority 1–3 schools")
+            st.caption("This ranking highlights schools that combine high or moderate heatwave vulnerability with the highest observed number of students per usable classroom. It does not apply an external overcrowding threshold.")
+            if pressure.empty:
+                st.caption("No Priority 1–3 schools with a valid classroom count match the current filters.")
+            else:
+                st.plotly_chart(px.bar(pressure.sort_values("students_per_classroom"), x="students_per_classroom", y="school_name",
+                    orientation="h", color="total_heatwave_days", color_continuous_scale="YlOrRd",
+                    hover_data=["district", "tehsil", "functional_toilets", "students_per_functional_toilet", "monitoring_date_used"],
+                    labels={"students_per_classroom": "Students per usable classroom", "school_name": "School", "total_heatwave_days": "Heatwave days"})
+                    .update_layout(margin=dict(l=10, r=10, t=30, b=10), yaxis={"categoryorder": "total ascending"}), width="stretch")
+
+        display_columns = ["emis_code", "school_name", "district", "tehsil", "total_heatwave_days", "total_heatwave_events",
+                           "monitoring_date_used", "monitoring_visit_status", "students_per_classroom", "students_per_functional_toilet",
+                           "essential_service_capacity", "vulnerability_priority", "data_quality_flag"]
+        st.dataframe(cum[display_columns], hide_index=True, height=420, column_config={
+            "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
+        })
+        st.download_button("Download filtered cumulative data", cum.to_csv(index=False).encode("utf-8"),
+            "filtered_cumulative_school_vulnerability.csv", "text/csv")
+
+    with tab_annual:
+        years = sorted(annual["event_year"].dropna().unique())
+        selected_year = st.selectbox("Heatwave year", years, index=len(years) - 1)
+        annual = annual[annual["event_year"] == selected_year]
+        monitored = annual["monitoring_date_used"].notna().sum()
+        weak = (annual["essential_service_capacity"] == "Weak").sum()
+        with st.container(horizontal=True):
+            st.metric("School-year records", f"{len(annual):,}", border=True)
+            st.metric("Monitoring record available", f"{monitored:,}", border=True)
+            st.metric("Average heatwave days", f"{annual['total_heatwave_days_year'].mean():.1f}" if len(annual) else "—", border=True)
+            st.metric("Weak service capacity", f"{weak:,}", border=True)
+
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(capacity_chart(annual, "essential_service_capacity", "Essential-service capacity"), width="stretch")
+        with right:
+            district_summary = annual.groupby("district", dropna=False).agg(
+                schools=("emis_code", "size"), mean_heatwave_days=("total_heatwave_days_year", "mean")
+            ).reset_index().sort_values("mean_heatwave_days", ascending=False).head(15)
+            st.plotly_chart(px.bar(district_summary, x="mean_heatwave_days", y="district", orientation="h",
+                title="Highest average exposure by district (top 15)", color="mean_heatwave_days", color_continuous_scale="YlOrRd")
+                .update_layout(margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
+
+        with st.container(border=True):
+            st.subheader("School priority ranking")
+            st.caption("Choose one measure to identify the 20 schools that most need review in the selected heatwave year. Hover over a bar for the selected heatwave event and monitoring visit date.")
+            ranking_choice = st.segmented_control(
+                "Rank schools by",
+                ["Selected-event heatwave days", "Classroom pressure", "Toilet pressure"],
+                default="Selected-event heatwave days",
+                key="annual_ranking_choice",
+            )
+            ranking_fields = {
+                "Selected-event heatwave days": ("selected_event_heatwave_days", "Heatwave days during selected event"),
+                "Classroom pressure": ("students_per_classroom", "Students per usable classroom"),
+                "Toilet pressure": ("students_per_functional_toilet", "Students per functional toilet"),
+            }
+            ranking_field, ranking_label = ranking_fields[ranking_choice]
+            ranked_schools = annual.dropna(subset=[ranking_field]).nlargest(20, ranking_field)
+            st.plotly_chart(px.bar(
+                ranked_schools.sort_values(ranking_field), x=ranking_field, y="school_name", orientation="h",
+                color="essential_service_capacity", hover_data=["district", "tehsil", "selected_event_code", "monitoring_date_used", "days_from_selected_event_start", "total_enrolment"],
+                labels={ranking_field: ranking_label, "school_name": "School", "essential_service_capacity": "Service capacity"},
+                title=f"Top 20 schools by {ranking_label.lower()}", color_discrete_sequence=px.colors.qualitative.Safe,
+            ).update_layout(margin=dict(l=10, r=10, t=50, b=10), yaxis={"categoryorder": "total ascending"}), width="stretch")
+        display_columns = ["emis_code", "school_name", "district", "tehsil", "event_year", "total_heatwave_days_year",
+                           "selected_event_code", "monitoring_date_used", "days_from_selected_event_start", "total_enrolment",
+                           "students_per_classroom", "students_per_functional_toilet", "essential_service_capacity", "data_quality_flag"]
+        st.dataframe(annual[display_columns], hide_index=True, height=420, column_config={
+            "students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d"),
+        })
+        st.download_button("Download filtered school-year data", annual.to_csv(index=False).encode("utf-8"),
+            f"filtered_school_year_heatwave_capacity_{selected_year}.csv", "text/csv")
+
+    with tab_rainfall:
+        rain = apply_filters(rainfall_schools, districts, levels)
+        rain_groups = apply_filters(rainfall_event_groups, districts, levels)
+        event_rollup = rain_groups.groupby(
+            ["event_code", "event_type", "event_start_date", "event_end_date"], dropna=False
+        ).agg(
+            schools_in_universe=("schools_in_universe", "sum"),
+            schools_exposed=("schools_exposed", "sum"),
+            enrolled_students_exposed=("enrolled_students_exposed", "sum"),
+            maximum_daily_rainfall_mm_exposed=("maximum_daily_rainfall_mm_exposed", "max"),
+            maximum_3day_rainfall_mm_exposed=("maximum_3day_rainfall_mm_exposed", "max"),
+        ).reset_index()
+        event_rollup["schools_exposed_percent"] = event_rollup["schools_exposed"] * 100 / event_rollup["schools_in_universe"]
+        event_rollup = event_rollup.sort_values("event_start_date")
+
+        st.caption("Workstream 1: 46 extreme-rainfall events, 2021–2025. Enrolment is the school record supplied with the exposure data; it is not a measure of enrolment disruption.")
+        ever_exposed = rain["ever_exposed_to_extreme_rainfall"].eq(1)
+        with st.container(horizontal=True):
+            st.metric("Schools in selection", f"{len(rain):,}", border=True)
+            st.metric("Ever exposed", f"{ever_exposed.sum():,}", border=True)
+            st.metric("High exposure", f"{rain['exposure_class'].eq('High').sum():,}", border=True)
+            st.metric("Students at ever-exposed schools", f"{rain.loc[ever_exposed, 'total_enrolment'].sum():,.0f}", border=True)
+
+        st.subheader("Where schools have experienced extreme rainfall")
+        exposure_classes = ["High", "Moderate", "Low", "No recorded exposure"]
+        selected_classes = st.pills(
+            "Exposure class on map", exposure_classes, selection_mode="multi", key="rainfall_map_exposure_class",
+            help="Select one or more classes. No selection shows all schools.",
+        )
+        st.caption("Map legend — colours show cumulative rainfall exposure; the pills above filter the displayed points.")
+        with st.container(horizontal=True, gap="small"):
+            st.badge("High · above the 67th percentile", icon=":material/circle:", color="red")
+            st.badge("Moderate · 33rd–67th percentile", icon=":material/circle:", color="orange")
+            st.badge("Low · at or below the 33rd percentile", icon=":material/circle:", color="yellow")
+            st.badge("No recorded exposure", icon=":material/circle:", color="gray")
+        rainfall_map_schools = rain[rain["exposure_class"].isin(selected_classes)] if selected_classes else rain
+        st.pydeck_chart(rainfall_exposure_map(rainfall_map_schools), height=520, key="rainfall_exposure_map")
+        st.caption(f"Showing {len(rainfall_map_schools):,} schools. High, moderate and low classes use percentile cut-offs among schools exposed at least once.")
+
+        st.subheader("When extreme-rainfall events affected schools")
+        if event_rollup.empty:
+            st.warning("No rainfall events match the current district and school-level filters.", icon=":material/filter_alt_off:")
+        else:
+            event_labels = {
+                row.event_code: f"{row.event_start_date:%d %b %Y} · {row.event_code} · {row.event_type}"
+                for row in event_rollup.itertuples()
+            }
+            selected_event_code = st.selectbox("Rainfall event", event_rollup["event_code"], format_func=event_labels.get)
+            selected_event = event_rollup.loc[event_rollup["event_code"] == selected_event_code].iloc[0]
+            with st.container(horizontal=True):
+                st.metric("Schools exposed", f"{selected_event['schools_exposed']:,.0f}", border=True)
+                st.metric("Share of selection", f"{selected_event['schools_exposed_percent']:.1f}%", border=True)
+                st.metric("Students at exposed schools", f"{selected_event['enrolled_students_exposed']:,.0f}", border=True)
+                st.metric("Maximum 3-day rainfall", f"{selected_event['maximum_3day_rainfall_mm_exposed']:.1f} mm", border=True)
+
+            event_breakdown = rain_groups[rain_groups["event_code"] == selected_event_code].groupby(
+                ["school_level", "school_gender"], dropna=False
+            ).agg(
+                schools_exposed=("schools_exposed", "sum"),
+                enrolled_students_exposed=("enrolled_students_exposed", "sum"),
+            ).reset_index()
+            event_measure = st.segmented_control(
+                "Break down the selected event by", ["Schools exposed", "Students at exposed schools"],
+                default="Schools exposed", key="rainfall_event_measure",
+            )
+            event_measure_column = "schools_exposed" if event_measure == "Schools exposed" else "enrolled_students_exposed"
+            left, right = st.columns(2)
+            with left:
+                st.plotly_chart(
+                    px.bar(event_rollup, x="schools_exposed", y="event_code", orientation="h", color="event_type",
+                        hover_data=["event_start_date", "event_end_date", "schools_exposed_percent", "enrolled_students_exposed"],
+                        labels={"schools_exposed": "Schools exposed", "event_code": "Rainfall event"},
+                        title="All 46 rainfall events")
+                    .update_layout(margin=dict(l=10, r=10, t=55, b=10), yaxis={"categoryorder": "total ascending"}),
+                    width="stretch",
+                )
+            with right:
+                st.plotly_chart(
+                    px.bar(event_breakdown, x=event_measure_column, y="school_level", color="school_gender", barmode="group",
+                        labels={event_measure_column: event_measure, "school_level": "School level", "school_gender": "School gender"},
+                        title="Selected event by school level and gender")
+                    .update_layout(margin=dict(l=10, r=10, t=55, b=10)),
+                    width="stretch",
+                )
+
             st.dataframe(
-                pd.DataFrame([
-                    ["Adequate", "Electricity and drinking water are both available, functional, and wholly provided."],
-                    ["Weak", "Electricity and drinking water are both unavailable or non-functional."],
-                    ["Partial", "Any other observed combination, including one adequate service and one weak/partial service."],
-                    ["Missing", "No eligible heatwave-year visit, or electricity/water availability or functionality is missing."],
-                ], columns=["Class", "Rule"]),
-                hide_index=True,
-                height=258,
-                row_height=56,
+                event_rollup[["event_code", "event_type", "event_start_date", "event_end_date", "schools_exposed", "schools_exposed_percent", "enrolled_students_exposed", "maximum_daily_rainfall_mm_exposed", "maximum_3day_rainfall_mm_exposed"]],
+                hide_index=True, height=360,
+                column_config={
+                    "event_start_date": st.column_config.DateColumn("Start", format="DD MMM YYYY"),
+                    "event_end_date": st.column_config.DateColumn("End", format="DD MMM YYYY"),
+                    "schools_exposed_percent": st.column_config.NumberColumn("Schools exposed", format="%.1f%%"),
+                    "enrolled_students_exposed": st.column_config.NumberColumn("Students at exposed schools", format="%.0f"),
+                    "maximum_daily_rainfall_mm_exposed": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
+                    "maximum_3day_rainfall_mm_exposed": st.column_config.NumberColumn("Maximum 3-day rainfall (mm)", format="%.1f"),
+                },
             )
 
-        method_priority_counts = cumulative["vulnerability_priority"].value_counts()
-        st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
-        st.markdown("**Combine exposure and capacity**")
+        st.subheader("School-level cumulative rainfall exposure")
+        rainfall_table = rain.sort_values(["rainfall_exposure_score", "events_exposed_count"], ascending=False)
         st.dataframe(
-            pd.DataFrame([
-                [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(method_priority_counts.get("Priority 1", 0))],
-                [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(method_priority_counts.get("Priority 2", 0))],
-                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(method_priority_counts.get("Priority 3", 0))],
-                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(method_priority_counts.get("Priority 4", 0))],
-                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(method_priority_counts.get("Priority 5", 0))],
-                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(method_priority_counts.get("Unclassified - PMIU missing", 0))],
-            ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
-            hide_index=True,
-            height=312,
-            row_height=44,
+            rainfall_table[["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class"]],
+            hide_index=True, height=420,
             column_config={
-                "Priority": st.column_config.TextColumn(width="medium"),
-                "Schools": st.column_config.NumberColumn(format="%d"),
+                "event_exposure_frequency_percent": st.column_config.NumberColumn("Event exposure", format="%.1f%%"),
+                "rainfall_exposure_score": st.column_config.NumberColumn("Exposure score", format="%.1f"),
+                "maximum_daily_rainfall_mm": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
+                "maximum_3day_rainfall_mm": st.column_config.NumberColumn("Maximum 3-day rainfall (mm)", format="%.1f"),
             },
         )
+        st.download_button(
+            "Download filtered rainfall school data", rainfall_table.to_csv(index=False).encode("utf-8"),
+            "filtered_punjab_school_rainfall_exposure.csv", "text/csv",
+        )
 
+        st.subheader("Rainfall coping-capacity priority")
+        st.caption(
+            "Combines each school's cumulative rainfall exposure with PMIU-visit proxies for structural condition, "
+            "learning-space continuity, sanitation and safe water. Sewerage/drainage is not scored — free-text mentions "
+            "cover under 1% of visits. Uses the PMIU visit closest to one of the school's own extreme-rainfall events, "
+            "matched by calendar year, the same nearest-visit rule used for heatwave."
+        )
+        rain_priority_counts = rain_cap["vulnerability_priority"].value_counts()
+        urgent_rain = rain_cap["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
+        weak_capacity = (rain_cap["rainfall_coping_capacity"] == "Weak").sum()
+        with st.container(horizontal=True):
+            st.metric("Exposed schools with a priority", f"{len(rain_cap):,}", border=True)
+            st.metric("Priority 1–2 schools", f"{urgent_rain:,}", border=True)
+            st.metric("Weak coping capacity", f"{weak_capacity:,}", border=True)
+            st.metric("No PMIU capacity match", f"{rain_priority_counts.get('Unclassified - capacity data missing', 0):,}", border=True)
+
+        rain_priorities = st.pills(
+            "Map priority legend",
+            RAINFALL_PRIORITY_OPTIONS,
+            selection_mode="multi",
+            format_func=lambda priority: f"{RAINFALL_PRIORITY_LABELS[priority]} ({rain_priority_counts.get(priority, 0):,})",
+            key="rainfall_priority_map_filter",
+        )
+        rain_map_schools = rain_cap[rain_cap["vulnerability_priority"].isin(rain_priorities)] if rain_priorities else rain_cap
+        rainfall_priority_tooltip = "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>Exposure: {exposure_class} · Capacity: {rainfall_coping_capacity}"
+        st.pydeck_chart(priority_map(rain_map_schools, "vulnerability_priority", rainfall_priority_tooltip, "rainfall_priority_schools"), height=520, key="rainfall_priority_map")
+        st.caption(f"Showing {len(rain_map_schools):,} exposed schools on the map.")
+
+        left, right = st.columns(2)
+        with left:
+            priority = rain_cap["vulnerability_priority"].fillna("Unclassified - capacity data missing").value_counts().reindex(
+                RAINFALL_PRIORITY_OPTIONS, fill_value=0
+            ).rename_axis("priority").reset_index(name="schools")
+            st.plotly_chart(px.bar(priority, x="priority", y="schools", color="priority", text="schools",
+                title="Exposed schools by rainfall vulnerability priority", color_discrete_sequence=px.colors.qualitative.Safe)
+                .update_layout(showlegend=False, margin=dict(l=10, r=10, t=55, b=10)), width="stretch")
+        with right:
+            dimension_choice = st.selectbox("Capacity dimension", list(RAINFALL_CAPACITY_DIMENSIONS.values()), key="rainfall_capacity_dimension")
+            dimension_column = next(key for key, label in RAINFALL_CAPACITY_DIMENSIONS.items() if label == dimension_choice)
+            st.plotly_chart(capacity_chart(rain_cap, dimension_column, dimension_choice), width="stretch")
+
+        rain_shortlist = rain_cap.assign(
+            _priority_order=rain_cap["vulnerability_priority"].str.extract(r"Priority (\d)")[0].astype(float).fillna(99)
+        ).sort_values(["_priority_order", "priority_rank", "rainfall_exposure_score"], ascending=[True, True, False]).head(100)
+        with st.container(border=True):
+            st.subheader("Priority school shortlist")
+            st.caption("The first 100 exposed schools after applying the current filters, ordered by priority category and rank.")
+            st.dataframe(
+                rain_shortlist[["priority_rank", "school_name", "district", "tehsil", "exposure_class", "rainfall_coping_capacity",
+                                 "cumulative_extreme_days", "monitoring_date_used", "monitoring_visit_status"]],
+                hide_index=True, height=360,
+                column_config={
+                    "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
+                    "cumulative_extreme_days": st.column_config.NumberColumn("Extreme-rainfall days", format="%.0f"),
+                    "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
+                    "monitoring_visit_status": "Monitoring status",
+                    "rainfall_coping_capacity": "Coping capacity",
+                },
+            )
+        st.download_button(
+            "Download rainfall vulnerability priority data", rain_cap.to_csv(index=False).encode("utf-8"),
+            "filtered_school_rainfall_vulnerability_priority.csv", "text/csv",
+        )
         st.info(
-            "Priority rank orders schools within each category by cumulative heatwave days, then EMIS code. "
-            "It supports review and targeting; it is not a causal estimate. Facility status describes the selected visit, not a cumulative physical condition.",
+            "Rainfall-enrolment disruption is not yet estimated here. It requires an event-study design over the "
+            "monthly enrolment panel, matching exposed and unexposed schools around each event.",
             icon=":material/info:",
         )
 
-    with st.container(border=True):
-        st.markdown("#### :material/water_drop: How rainfall priorities are set")
+    with tab_profile:
         st.caption(
-            "Rainfall priority follows the same two-step exposure-then-capacity logic as heatwave, using proxies from PMIU "
-            "visits instead of an ASC/SIS capacity extract. Only exposed schools (events_exposed_count > 0) receive a priority."
+            "Search finds schools from the heatwave-exposed population. Service and infrastructure values come from the "
+            "PMIU visit closest to a heatwave (or, in the rainfall section below, an extreme-rainfall event) in the same year."
         )
+        school_profile(cum, yearly, rainfall_cumulative, rainfall_yearly, "school_profile")
 
-        rain_exposure_step, rain_capacity_step = st.columns([1, 1.6], gap="large")
-        with rain_exposure_step:
-            st.badge("Step 1 · Exposure", icon=":material/water_drop:", color="blue")
-            st.markdown("**Cumulative rainfall exposure**")
-            st.caption("Composite of event frequency, intensity and persistence — see the rainfall exposure tab legend.")
+    with tab_notes:
+        st.subheader("Method")
+        st.caption("A quick guide to the atlas, its data choices, and the vulnerability-priority logic.")
+
+        with st.container(border=True):
+            st.markdown("#### :material/explore: How to read the atlas")
+            st.caption("Each section answers a different question. Use the sidebar filters to narrow the same school population throughout.")
             st.dataframe(
                 pd.DataFrame([
-                    ["Low", "At or below the 33rd percentile among exposed schools"],
-                    ["Moderate", "Between the 33rd and 67th percentiles"],
-                    ["High", "Above the 67th percentile"],
-                ], columns=["Class", "Rule"]),
+                    ["Sidebar filters", "District and school level", "Filters every tab's school-level results, including Combined hazards."],
+                    ["Combined hazards: headline metrics", "Schools exposed to at least one hazard, both hazards, and compounding-risk counts", "Start here for a single view of overall climate risk across the two hazards."],
+                    ["Combined hazards: overlap", "Bar chart and district ranking of heatwave-only, rainfall-only, and both-hazard schools", "Identifies districts where the two hazards compound rather than just co-occur."],
+                    ["Combined hazards: priority map & shortlist", "Schools coloured by combined priority, with the driving hazard in the tooltip", "Use for cross-hazard targeting; drill into a single hazard using the dedicated tabs below."],
+                    ["Heatwave decision view: headline metrics", "Counts of exposed, high-exposure, urgent, and unmatched schools", "A quick summary of the current district and level selection, heatwave only."],
+                    ["Heatwave decision view: priority map", "School locations coloured by heatwave vulnerability priority", "Use the priority pills to show one or several categories; hover for school details."],
+                    ["Heatwave decision view: shortlist", "First 100 schools ordered by priority category and rank", "Use as a review or targeting list, not as a causal-impact ranking."],
+                    ["Heatwave cumulative view", "One row per exposed school; heatwave exposure summed across 2021–2026", "Capacity comes from the closest eligible PMIU visit in one of that school's heatwave years."],
+                    ["Heatwave cumulative: classroom pressure", "Priority 1–3 schools with the most students per usable classroom", "Highlights schools where heat exposure and observed classroom pressure overlap."],
+                    ["Heatwave school-year view", "One row per school and heatwave year", "Uses one PMIU visit: the visit closest to a heatwave in that same year."],
+                    ["Heatwave school-year: priority ranking", "Top 20 schools for exposure, classroom pressure, or toilet pressure", "Switch the measure to review different operational pressures."],
+                    ["Rainfall exposure & priority", "Punjab exposure across 46 extreme-rainfall events, 2021–2025, plus rainfall vulnerability priority", "Use the event selector for timing and composition; use the priority section for PMIU-linked coping capacity and targeting."],
+                    ["School profile: heatwave summary", "Cumulative heatwave exposure and selected school-capacity indicators", "Describes the chosen school using the heatwave cumulative output."],
+                    ["School profile: heatwave visit history", "One selected monitoring visit for every exposed heatwave year", "A blank date means no PMIU visit was available in that year."],
+                    ["School profile: rainfall section", "Cumulative rainfall exposure, capacity, and rainfall-year visit history for the same school", "Shows 'no recorded exposure' if the selected school was never in an extreme-rainfall footprint."],
+                    ["Method", "Definitions, matching rules, and priority construction for both hazards and the combined view", "Use this section when interpreting or reporting dashboard results."],
+                ], columns=["Tab / section", "What it shows", "How to use it"]),
                 hide_index=True,
-                height=145,
-                row_height=48,
+                height=940,
+                row_height=52,
+                column_config={
+                    "Tab / section": st.column_config.TextColumn(width="medium"),
+                    "What it shows": st.column_config.TextColumn(width="large"),
+                    "How to use it": st.column_config.TextColumn(width="large"),
+                },
             )
 
-        with rain_capacity_step:
-            st.badge("Step 2 · Coping capacity", icon=":material/handyman:", color="orange")
-            st.markdown("**Four PMIU-visit proxies, scored at the visit closest to one of the school's exposed rainfall years**")
+        with st.container(border=True):
+            st.markdown("#### :material/fact_check: Workstream coverage")
             st.dataframe(
                 pd.DataFrame([
-                    ["Structural condition", "Building cleanliness status", "96.3%", "Adequate = good; Partial = average; Weak = poor."],
-                    ["Learning-space continuity", "Classrooms used for teaching ÷ total classrooms", "99.8%", "Adequate ≥90%; Partial 70–<90%; Weak <70%."],
-                    ["Sanitation", "Functional toilets ÷ total toilets", "99.8%", "Adequate ≥90%; Partial 50–<90%; Weak <50% or none functional."],
-                    ["Safe water", "Availability, functionality and extent", "96.2%", "Adequate = available, functional and wholly provided; Weak = unavailable or non-functional."],
-                    ["Drainage/sewerage", "Only free-text mentions", "0.04%", "Not usable — excluded from the capacity score."],
-                ], columns=["Dimension", "Proxy", "PMIU coverage", "Rule"]),
+                    ["Policy Question 1", "Where and when schools are exposed, and the affected school/enrolment counts", "Heatwave and rainfall exposure views support this for Punjab; rainfall is disaggregated by school level and gender."],
+                    ["Policy Question 2", "Whether climate events cause enrolment disruption, recovery or persistent decline", "Not yet estimated. This requires a monthly enrolment panel and an exposed-versus-unexposed event-study design."],
+                    ["Risk prioritisation", "Which exposed schools also have weak capacity", "Available for heatwave and rainfall. Rainfall capacity uses PMIU-visit proxies (cleanliness, classrooms, toilets, water); no ASC/SIS structural or drainage extract was available, so drainage is excluded."],
+                    ["Workstream 3 (compounding exposure)", "Which schools and districts face both hazards at once", "Partial. The Combined hazards tab overlays heatwave and rainfall priority per school, but is not the full Tier A composite index — it has no district-level SES, population density or poverty proxies, and no Workstream 2 sensitivity input."],
+                ], columns=["Question", "Dashboard coverage", "Current status"]),
+                hide_index=True,
+                height=270,
+                row_height=56,
+                column_config={
+                    "Question": st.column_config.TextColumn(width="medium"),
+                    "Dashboard coverage": st.column_config.TextColumn(width="large"),
+                    "Current status": st.column_config.TextColumn(width="large"),
+                },
+            )
+
+        with st.container(border=True):
+            st.markdown("#### :material/public: How the combined hazard view is built")
+            st.caption(
+                "The Combined hazards tab is a per-school overlay of the two independent hazard-specific priorities below — "
+                "it does not recompute exposure or capacity from scratch."
+            )
+            st.dataframe(
+                pd.DataFrame([
+                    ["Hazard exposure", "Heatwave only, Rainfall only, or Heatwave and rainfall", "Based on whether the school appears in the heatwave and/or rainfall cumulative vulnerability files."],
+                    ["Combined priority", "The more severe (lower-numbered) of the heatwave and rainfall priorities", "Not an average. A school at heatwave Priority 1 and rainfall Priority 4 is shown as combined Priority 1."],
+                    ["Combined priority driver", "Which hazard produced the combined priority: Heatwave, Rainfall, or Both (tied)", "Shown in the map tooltip and useful for deciding which single-hazard tab to open next."],
+                    ["Compounding high risk", "True when a school is independently Priority 1 or 2 on both heatwave and rainfall", "The clearest signal of a school needing attention on more than one hazard, not just the more severe one."],
+                    ["Unclassified", "Neither hazard could assign a numbered priority", "Usually missing PMIU capacity data for both hazards, not evidence of low risk."],
+                ], columns=["Field", "Values", "Rule"]),
                 hide_index=True,
                 height=214,
+                row_height=56,
+                column_config={"Field": st.column_config.TextColumn(width="medium")},
+            )
+            st.info(
+                "This overlay only combines Workstream 1 exposure and capacity for two hazards. It is a simplified stand-in "
+                "for Workstream 3's Tier A composite risk index, which additionally requires observed enrolment sensitivity "
+                "(Workstream 2) and district-level SES/population/poverty proxies — none of which exist in this repository yet.",
+                icon=":material/info:",
+            )
+
+        with st.container(border=True):
+            st.markdown("#### :material/account_tree: How heatwave priorities are set")
+            st.caption("Priority is calculated from the full cumulative school dataset before dashboard filters are applied.")
+
+            exposure_step, capacity_step = st.columns([1, 1.4], gap="large")
+            with exposure_step:
+                st.badge("Step 1 · Exposure", icon=":material/thermostat:", color="orange")
+                st.markdown("**Cumulative heatwave exposure**")
+                st.dataframe(
+                    pd.DataFrame([
+                        ["Low", "14–34 cumulative heatwave days", "At or below the 33rd percentile"],
+                        ["Moderate", "35–38 cumulative heatwave days", "Between the 33rd and 67th percentiles"],
+                        ["High", "39–48 cumulative heatwave days", "Above the 67th percentile"],
+                    ], columns=["Class", "Current range", "Rule"]),
+                    hide_index=True,
+                    height=214,
+                    row_height=56,
+                )
+
+            with capacity_step:
+                st.badge("Step 2 · School capacity", icon=":material/electric_bolt:", color="blue")
+                st.markdown("**Essential services at the selected PMIU visit**")
+                st.dataframe(
+                    pd.DataFrame([
+                        ["Adequate", "Electricity and drinking water are both available, functional, and wholly provided."],
+                        ["Weak", "Electricity and drinking water are both unavailable or non-functional."],
+                        ["Partial", "Any other observed combination, including one adequate service and one weak/partial service."],
+                        ["Missing", "No eligible heatwave-year visit, or electricity/water availability or functionality is missing."],
+                    ], columns=["Class", "Rule"]),
+                    hide_index=True,
+                    height=258,
+                    row_height=56,
+                )
+
+            method_priority_counts = cumulative["vulnerability_priority"].value_counts()
+            st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
+            st.markdown("**Combine exposure and capacity**")
+            st.dataframe(
+                pd.DataFrame([
+                    [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(method_priority_counts.get("Priority 1", 0))],
+                    [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(method_priority_counts.get("Priority 2", 0))],
+                    [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(method_priority_counts.get("Priority 3", 0))],
+                    [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(method_priority_counts.get("Priority 4", 0))],
+                    [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(method_priority_counts.get("Priority 5", 0))],
+                    [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(method_priority_counts.get("Unclassified - PMIU missing", 0))],
+                ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
+                hide_index=True,
+                height=312,
                 row_height=44,
-                column_config={"Dimension": st.column_config.TextColumn(width="medium")},
+                column_config={
+                    "Priority": st.column_config.TextColumn(width="medium"),
+                    "Schools": st.column_config.NumberColumn(format="%d"),
+                },
             )
-            st.caption("Each of the four scored dimensions contributes Adequate = 2, Partial = 1, Weak = 0 to a 0–8 capacity score.")
 
-        rain_priority_counts = rainfall_cumulative["vulnerability_priority"].value_counts()
-        st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
-        st.markdown("**Combine exposure and coping capacity**")
-        st.dataframe(
-            pd.DataFrame([
-                [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(rain_priority_counts.get("Priority 1", 0))],
-                [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(rain_priority_counts.get("Priority 2", 0))],
-                [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(rain_priority_counts.get("Priority 3", 0))],
-                [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(rain_priority_counts.get("Priority 4", 0))],
-                [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(rain_priority_counts.get("Priority 5", 0))],
-                [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(rain_priority_counts.get("Unclassified - capacity data missing", 0))],
-            ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
-            hide_index=True,
-            height=312,
-            row_height=44,
-            column_config={
-                "Priority": st.column_config.TextColumn(width="medium"),
-                "Schools": st.column_config.NumberColumn(format="%d"),
-            },
-        )
+            st.info(
+                "Priority rank orders schools within each category by cumulative heatwave days, then EMIS code. "
+                "It supports review and targeting; it is not a causal estimate. Facility status describes the selected visit, not a cumulative physical condition.",
+                icon=":material/info:",
+            )
 
-        st.info(
-            "Priority rank orders schools within each category by rainfall exposure score, then EMIS code. It supports review "
-            "and targeting, not a causal estimate. Schools never exposed to an extreme-rainfall event are excluded from "
-            "priority, not scored as low-risk. No damage-severity modifier is applied, unlike the original methodology brief, "
-            "because a reported rain/flood damage field was not available in the PMIU visit data used here.",
-            icon=":material/info:",
-        )
+        with st.container(border=True):
+            st.markdown("#### :material/water_drop: How rainfall priorities are set")
+            st.caption(
+                "Rainfall priority follows the same two-step exposure-then-capacity logic as heatwave, using proxies from PMIU "
+                "visits instead of an ASC/SIS capacity extract. Only exposed schools (events_exposed_count > 0) receive a priority."
+            )
+
+            rain_exposure_step, rain_capacity_step = st.columns([1, 1.6], gap="large")
+            with rain_exposure_step:
+                st.badge("Step 1 · Exposure", icon=":material/water_drop:", color="blue")
+                st.markdown("**Cumulative rainfall exposure**")
+                st.caption("Composite of event frequency, intensity and persistence — see the rainfall exposure tab legend.")
+                st.dataframe(
+                    pd.DataFrame([
+                        ["Low", "At or below the 33rd percentile among exposed schools"],
+                        ["Moderate", "Between the 33rd and 67th percentiles"],
+                        ["High", "Above the 67th percentile"],
+                    ], columns=["Class", "Rule"]),
+                    hide_index=True,
+                    height=145,
+                    row_height=48,
+                )
+
+            with rain_capacity_step:
+                st.badge("Step 2 · Coping capacity", icon=":material/handyman:", color="orange")
+                st.markdown("**Four PMIU-visit proxies, scored at the visit closest to one of the school's exposed rainfall years**")
+                st.dataframe(
+                    pd.DataFrame([
+                        ["Structural condition", "Building cleanliness status", "96.3%", "Adequate = good; Partial = average; Weak = poor."],
+                        ["Learning-space continuity", "Classrooms used for teaching ÷ total classrooms", "99.8%", "Adequate ≥90%; Partial 70–<90%; Weak <70%."],
+                        ["Sanitation", "Functional toilets ÷ total toilets", "99.8%", "Adequate ≥90%; Partial 50–<90%; Weak <50% or none functional."],
+                        ["Safe water", "Availability, functionality and extent", "96.2%", "Adequate = available, functional and wholly provided; Weak = unavailable or non-functional."],
+                        ["Drainage/sewerage", "Only free-text mentions", "0.04%", "Not usable — excluded from the capacity score."],
+                    ], columns=["Dimension", "Proxy", "PMIU coverage", "Rule"]),
+                    hide_index=True,
+                    height=214,
+                    row_height=44,
+                    column_config={"Dimension": st.column_config.TextColumn(width="medium")},
+                )
+                st.caption("Each of the four scored dimensions contributes Adequate = 2, Partial = 1, Weak = 0 to a 0–8 capacity score.")
+
+            rain_priority_counts = rainfall_cumulative["vulnerability_priority"].value_counts()
+            st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
+            st.markdown("**Combine exposure and coping capacity**")
+            st.dataframe(
+                pd.DataFrame([
+                    [PRIORITY_LABELS["Priority 1"], "High", "Weak", int(rain_priority_counts.get("Priority 1", 0))],
+                    [PRIORITY_LABELS["Priority 2"], "High", "Partial", int(rain_priority_counts.get("Priority 2", 0))],
+                    [PRIORITY_LABELS["Priority 3"], "High", "Adequate", int(rain_priority_counts.get("Priority 3", 0))],
+                    [PRIORITY_LABELS["Priority 4"], "Low or moderate", "Weak or partial", int(rain_priority_counts.get("Priority 4", 0))],
+                    [PRIORITY_LABELS["Priority 5"], "Low or moderate", "Adequate", int(rain_priority_counts.get("Priority 5", 0))],
+                    [PRIORITY_LABELS["Unclassified - PMIU missing"], "Any", "Missing", int(rain_priority_counts.get("Unclassified - capacity data missing", 0))],
+                ], columns=["Priority", "Exposure", "Capacity", "Schools"]),
+                hide_index=True,
+                height=312,
+                row_height=44,
+                column_config={
+                    "Priority": st.column_config.TextColumn(width="medium"),
+                    "Schools": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+
+            st.info(
+                "Priority rank orders schools within each category by rainfall exposure score, then EMIS code. It supports review "
+                "and targeting, not a causal estimate. Schools never exposed to an extreme-rainfall event are excluded from "
+                "priority, not scored as low-risk. No damage-severity modifier is applied, unlike the original methodology brief, "
+                "because a reported rain/flood damage field was not available in the PMIU visit data used here.",
+                icon=":material/info:",
+            )

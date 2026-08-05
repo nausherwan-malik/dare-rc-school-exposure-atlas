@@ -13,7 +13,25 @@ Everyone invited to the private app can view and download the filtered results f
 
 ## What the dashboard answers
 
-The app is one Streamlit page with seven tabs. Start at **Combined hazards** for a single cross-hazard view; drill into **Heatwave** or **Rainfall** tabs for hazard-specific detail; use **School profile** to look up one school across both hazards.
+The app has **two modes**, switched with a segmented control at the top of the page. Both read the same underlying data and respect the same sidebar filters (district, school level) — they differ only in how much detail and jargon they show.
+
+### 🏠 Simple overview (default)
+
+One scrollable page for anyone — policymakers, journalists, parents, field staff — with no dashboard experience required:
+
+- A plain-language explanation of what the page shows, up front.
+- Headline numbers ("students in schools with any climate exposure", "schools needing urgent attention").
+- **Look up a school** — type a name, get a plain-language risk card per match ("🔴 Urgent · Faces both heatwaves and extreme rainfall"), with a "See technical details" expander for anyone who wants the underlying codes and numbers.
+- A single combined-risk map with a plain-language legend (Urgent / High concern / Watch / Lower concern / Not enough data).
+- The districts needing the most attention, as a simple bar chart.
+- Two explainer cards answering "what is a heatwave / extreme-rainfall event, in plain terms."
+- A glossary translating every technical term (EMIS code, PMIU visit, exposure, coping capacity, priority, compounding risk) into one plain sentence each.
+
+Nothing in Simple overview is a new calculation — every number is pulled from the same combined dataset the detailed tabs use, just relabelled and reorganized. The technical detail is one click away, never hidden permanently.
+
+### 🔬 Full dashboard
+
+The seven-tab, research-grade view, for anyone who needs the underlying rigor — full filtering, every column, every download, every methodology note.
 
 | Tab | Question it answers |
 | --- | --- |
@@ -25,7 +43,7 @@ The app is one Streamlit page with seven tabs. Start at **Combined hazards** for
 | 🏫 School profile | Full heatwave and rainfall history for one chosen school. |
 | ℹ️ Method | Definitions, matching rules, and priority construction for both hazards and the combined view — read this before citing any number from the app. |
 
-Sidebar filters (district, school level) apply to every tab.
+Every table has a download button so filtered results can leave the app as CSV.
 
 ## Data the app reads
 
@@ -40,7 +58,7 @@ Sidebar filters (district, school level) apply to every tab.
 
 The app builds one more dataset **in memory, on load** — it is not a file:
 
-- **Combined hazard table** (`build_combined()` in `app.py`): an outer join of the two cumulative vulnerability files on EMIS code, adding `hazard_exposure` (Heatwave only / Rainfall only / Heatwave and rainfall), `combined_priority` (the more severe of the two hazard priorities), `combined_priority_driver`, and `compounding_high_risk` (independently Priority 1–2 on both hazards). See the Method tab for the exact rule.
+- **Combined hazard table** (`build_combined()` in `app.py`): an outer join of the two cumulative vulnerability files on EMIS code, adding `hazard_exposure` (Heatwave only / Rainfall only / Heatwave and rainfall), `combined_priority` (the more severe of the two hazard priorities), `combined_priority_driver`, `compounding_high_risk` (independently Priority 1–2 on both hazards), and `combined_enrolment`. See the Method tab for the exact rule. **This one table powers both dashboard modes** — Simple overview relabels it in plain language; the Combined hazards tab in Full dashboard shows it directly.
 
 ## Methodology
 
@@ -80,7 +98,7 @@ A per-school overlay of the two independent priorities above, joined on EMIS cod
 
 | File | Short description |
 | --- | --- |
-| `app.py` | Streamlit dashboard application — all seven tabs described above. |
+| `app.py` | Streamlit dashboard application — the Simple overview / Full dashboard mode toggle, the seven detailed tabs, and `build_combined()` / `render_overview()`. |
 | `requirements.txt` | Core Python dependencies needed to run the dashboard. |
 | `requirements-analytics.txt` | Extra Python packages used for analysis, SQL, and data-processing work. |
 | `AGENTS.md` | Instructions for AI coding agents working in this repository. |
