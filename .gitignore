@@ -16,5 +16,12 @@
 !final_school_rainfall_vulnerability_nearest_event.csv
 !school_year_rainfall_capacity.csv
 
+# CITY@LUMS project page (public site content, includes a trimmed per-school export
+# baked into the HTML for the interactive map/search — see Webpage-Content/city-lums-project-page.html).
+!Webpage-Content/
+!Webpage-Content/**
+Webpage-Content/.DS_Store
+Webpage-Content/**/.DS_Store
+
 # Never publish credentials.
 .streamlit/secrets.toml
