@@ -16,6 +16,7 @@ RAINFALL_EVENTS_FILE = ROOT / "punjab_rainfall_event_summary.csv"
 RAINFALL_EVENT_GROUPS_FILE = ROOT / "punjab_rainfall_event_disaggregation.csv"
 RAINFALL_CUMULATIVE_FILE = ROOT / "final_school_rainfall_vulnerability_nearest_event.csv"
 RAINFALL_YEARLY_FILE = ROOT / "school_year_rainfall_capacity.csv"
+FLOOD_HAZARD_FILE = ROOT / "rainfall-data/OneDrive_1_17-08-2026/School_Flood_Hazard_Index.csv"
 
 RAINFALL_CAPACITY_DIMENSIONS = {
     "structural_condition_status": "Structural condition (building cleanliness)",
@@ -208,7 +209,16 @@ def load_rainfall_events() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 @st.cache_data(show_spinner="Loading rainfall coping-capacity data…")
 def load_rainfall_cumulative() -> pd.DataFrame:
-    return pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
+    rainfall = pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
+    if not FLOOD_HAZARD_FILE.exists():
+        return rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]})
+    flood = pd.read_csv(FLOOD_HAZARD_FILE, dtype={"school_id": "string"})
+    flood["emis_code"] = flood["school_id"].str.slice(1)
+    flood = flood.rename(columns={"school_id": "flood_source_emis"})
+    return rainfall.merge(
+        flood[["emis_code", "flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]],
+        on="emis_code", how="left", validate="one_to_one",
+    )
 
 
 @st.cache_data(show_spinner="Loading rainfall year-by-year data…")
@@ -587,6 +597,18 @@ def render_cross_hazard_section(combined_df: pd.DataFrame, show_detail: bool) ->
 
 def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFrame, show_detail: bool, districts: list[str], levels: list[str]) -> None:
     st.caption(cfg["intro"])
+    if show_detail and cfg.get("flood_hazard_note"):
+        st.caption(cfg["flood_hazard_note"])
+    if cfg["flood_hazard_options"]:
+        flood_counts = frame["hazard_class"].value_counts()
+        selected_flood_hazards = st.pills(
+            "Flood hazard priority (SFHI)", cfg["flood_hazard_options"], selection_mode="multi",
+            format_func=lambda option: f"{option} ({flood_counts.get(option, 0):,})", key=f"{cfg['key']}_flood_hazard_pills",
+            help="Filter every rainfall result below by the School Flood Hazard Index class. This is hazard severity, not a PMIU-based vulnerability priority.",
+        )
+        st.caption(cfg["flood_hazard_caption"])
+        if selected_flood_hazards:
+            frame = frame[frame["hazard_class"].isin(selected_flood_hazards)]
     if frame.empty:
         st.warning("No schools match the current filters.", icon=":material/filter_alt_off:")
         return
@@ -1065,6 +1087,9 @@ HEAT_CONFIG = {
     "yearly_table_column_config": {"students_per_classroom": st.column_config.NumberColumn("Students per usable classroom", format="%d")},
     "yearly_download_prefix": "filtered_school_year_heatwave_capacity",
     "extra_panel": None,
+    "flood_hazard_note": None,
+    "flood_hazard_options": None,
+    "flood_hazard_caption": None,
 }
 
 RAIN_CONFIG = {
@@ -1094,8 +1119,11 @@ RAIN_CONFIG = {
         "monitoring_visit_status": "Monitoring status",
         "rainfall_coping_capacity": "Coping capacity",
     },
-    "full_table_columns": ["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class", "rainfall_coping_capacity", "vulnerability_priority", "data_quality_flag"],
+    "full_table_columns": ["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "sfhi_100", "hazard_class", "s1_flood_frequency", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class", "total_enrolment", "classrooms_used_for_teaching", "functional_toilets", "building_cleanliness", "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status", "rainfall_coping_capacity", "vulnerability_priority", "data_quality_flag"],
     "full_table_column_config": {
+        "sfhi_100": st.column_config.NumberColumn("School Flood Hazard Index (0–100)", format="%.1f"),
+        "hazard_class": "Flood hazard class",
+        "s1_flood_frequency": st.column_config.NumberColumn("Sentinel-1 flood frequency", format="%.3f"),
         "event_exposure_frequency_percent": st.column_config.NumberColumn("Event exposure", format="%.1f%%"),
         "rainfall_exposure_score": st.column_config.NumberColumn("Exposure score", format="%.1f"),
         "maximum_daily_rainfall_mm": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
@@ -1117,6 +1145,9 @@ RAIN_CONFIG = {
     "yearly_download_prefix": "filtered_school_year_rainfall_capacity",
     "extra_panel": render_rainfall_event_timeline,
     "extra_panel_label": ":material/history: When extreme-rainfall events affected schools (46-event timeline)",
+    "flood_hazard_note": "The School Flood Hazard Index is joined to the nearest-event PMIU indicators by corrected EMIS code. It combines equally weighted, 0–1-normalized CHIRP rainfall exposure and Sentinel-1 flood evidence; it is available for review and download, but does not yet change the existing rainfall priority.",
+    "flood_hazard_options": ["Very High", "High", "Moderate", "Low", "Very Low"],
+    "flood_hazard_caption": "SFHI flood-hazard priority combines CHIRP rainfall exposure and Sentinel-1 flood evidence with equal weight. It filters the map, charts, shortlist, technical table and download below; it does not replace the PMIU-based vulnerability priority.",
 }
 
 
