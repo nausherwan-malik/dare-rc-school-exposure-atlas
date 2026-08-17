@@ -211,14 +211,37 @@ def load_rainfall_events() -> tuple[pd.DataFrame, pd.DataFrame]:
 def load_rainfall_cumulative(flood_data_version: int | None) -> pd.DataFrame:
     rainfall = pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
     if not FLOOD_HAZARD_FILE.exists():
-        return rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]})
+        return add_flood_policy(rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]}))
     flood = pd.read_csv(FLOOD_HAZARD_FILE, dtype={"school_id": "string"})
     flood["emis_code"] = flood["school_id"].str.slice(1)
     flood = flood.rename(columns={"school_id": "flood_source_emis"})
-    return rainfall.merge(
+    return add_flood_policy(rainfall.merge(
         flood[["emis_code", "flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]],
         on="emis_code", how="left", validate="one_to_one",
-    )
+    ))
+
+
+def add_flood_policy(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    result["flood_evidence"] = pd.NA
+    result["flood_policy_action"] = pd.NA
+    signal = result["s1_norm"].dropna()
+    observed = signal[signal.gt(0)]
+    if observed.empty:
+        return result
+    threshold = observed.quantile(0.67)
+    high_rain = result["exposure_class"].eq("High")
+    repeated_flood = result["s1_norm"].ge(threshold)
+    result["flood_evidence"] = "Lower flood evidence"
+    result.loc[high_rain & repeated_flood, "flood_evidence"] = "Confirmed high flood hazard"
+    result.loc[high_rain & ~repeated_flood, "flood_evidence"] = "High rainfall, unconfirmed inundation"
+    result.loc[~high_rain & repeated_flood, "flood_evidence"] = "Observed flooding, lower rainfall signal"
+    result["flood_policy_action"] = "Monitor and maintain"
+    result.loc[result["flood_evidence"].eq("Confirmed high flood hazard") & result["rainfall_coping_capacity"].isin(["Weak", "Partial"]), "flood_policy_action"] = "Immediate protection"
+    result.loc[result["flood_evidence"].isin(["High rainfall, unconfirmed inundation", "Observed flooding, lower rainfall signal"]), "flood_policy_action"] = "Field verification"
+    result.loc[result["flood_evidence"].eq("Confirmed high flood hazard") & result["rainfall_coping_capacity"].eq("Adequate"), "flood_policy_action"] = "Resilience investment"
+    result["flood_s1_threshold"] = threshold
+    return result
 
 
 @st.cache_data(show_spinner="Loading rainfall year-by-year data…")
@@ -387,22 +410,8 @@ def render_flood_policy_panel(frame: pd.DataFrame) -> None:
     if frame["s1_norm"].notna().sum() == 0:
         st.caption("Flood evidence will appear when the SFHI source file is available.")
         return
-    s1_threshold = frame.loc[frame["s1_norm"].gt(0), "s1_norm"].quantile(0.67)
-    high_rain = frame["exposure_class"].eq("High")
-    repeated_flood = frame["s1_norm"].ge(s1_threshold)
-    evidence = pd.Series("Lower flood evidence", index=frame.index)
-    evidence.loc[high_rain & repeated_flood] = "Confirmed high flood hazard"
-    evidence.loc[high_rain & ~repeated_flood] = "High rainfall, unconfirmed inundation"
-    evidence.loc[~high_rain & repeated_flood] = "Observed flooding, lower rainfall signal"
-    action = pd.Series("Monitor and maintain", index=frame.index)
-    action.loc[evidence.eq("Confirmed high flood hazard") & frame["rainfall_coping_capacity"].isin(["Weak", "Partial"])] = "Immediate protection"
-    action.loc[evidence.isin(["High rainfall, unconfirmed inundation", "Observed flooding, lower rainfall signal"])] = "Field verification"
-    action.loc[evidence.eq("Confirmed high flood hazard") & frame["rainfall_coping_capacity"].eq("Adequate")] = "Resilience investment"
-    policy = frame.assign(flood_evidence=evidence, flood_policy_action=action)
+    policy = frame
     st.caption("Confirmed hazard combines high rainfall exposure with repeated satellite flood evidence. Where the two signals disagree, the action is field verification. PMIU capacity then distinguishes immediate protection from longer-term resilience investment.")
-    counts = policy["flood_policy_action"].value_counts()
-    selected = st.pills("Policy action", ["Immediate protection", "Field verification", "Resilience investment", "Monitor and maintain"], selection_mode="multi", format_func=lambda x: f"{x} ({counts.get(x, 0):,})", key="flood_policy_action")
-    policy = policy[policy["flood_policy_action"].isin(selected)] if selected else policy
     with st.container(horizontal=True):
         st.metric("Immediate protection", f"{(policy['flood_policy_action'] == 'Immediate protection').sum():,}", border=True)
         st.metric("Field verification", f"{(policy['flood_policy_action'] == 'Field verification').sum():,}", border=True)
@@ -410,7 +419,7 @@ def render_flood_policy_panel(frame: pd.DataFrame) -> None:
     colors = {"Immediate protection": [153, 27, 27, 210], "Field verification": [245, 158, 11, 170], "Resilience investment": [45, 125, 210, 150], "Monitor and maintain": [87, 125, 155, 70]}
     points = prepare_map_points(policy, "flood_policy_action", colors, ["school_name", "district", "flood_evidence", "flood_policy_action", "sfhi_100", "rainfall_coping_capacity"])
     st.pydeck_chart(hazard_map(points, "flood_policy_map", "<b>{school_name}</b><br/>{district}<br/>{flood_policy_action}<br/>{flood_evidence}<br/>SFHI: {sfhi_100}<br/>Capacity: {rainfall_coping_capacity}"), height=420, key="flood_policy_map")
-    st.caption(f"Repeated Sentinel-1 flood evidence means at or above the current 67th percentile among schools with observed flood signal ({s1_threshold:.3f}). Evidence disagreement is a field-verification flag, not a lower-risk judgement.")
+    st.caption(f"Repeated Sentinel-1 flood evidence means at or above the current 67th percentile among schools with observed flood signal ({policy['flood_s1_threshold'].dropna().iloc[0]:.3f}). Evidence disagreement is a field-verification flag, not a lower-risk judgement.")
     st.dataframe(policy.sort_values(["flood_policy_action", "sfhi_100", "total_enrolment"], ascending=[True, False, False])[['school_name', 'district', 'tehsil', 'flood_evidence', 'flood_policy_action', 'sfhi_100', 'total_enrolment', 'rainfall_coping_capacity']], hide_index=True, height=360, column_config={"sfhi_100": st.column_config.NumberColumn("SFHI (0–100)", format="%.1f"), "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"), "rainfall_coping_capacity": "PMIU capacity"})
 def legend_pills(options: list[str], labels: dict, counts: pd.Series, key: str, plain: bool = False) -> list[str]:
     """A clickable, multi-select map legend with live counts — used for every map in the app."""
@@ -628,16 +637,6 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
     st.caption(cfg["intro"])
     if show_detail and cfg.get("flood_hazard_note"):
         st.caption(cfg["flood_hazard_note"])
-    if cfg["flood_hazard_options"] and frame["hazard_class"].notna().any():
-        flood_counts = frame["hazard_class"].value_counts()
-        selected_flood_hazards = st.pills(
-            "Flood hazard priority (SFHI)", cfg["flood_hazard_options"], selection_mode="multi",
-            format_func=lambda option: f"{option} ({flood_counts.get(option, 0):,})", key=f"{cfg['key']}_flood_hazard_pills",
-            help="Filter every rainfall result below by the School Flood Hazard Index class. This is hazard severity, not a PMIU-based vulnerability priority.",
-        )
-        st.caption(cfg["flood_hazard_caption"])
-        if selected_flood_hazards:
-            frame = frame[frame["hazard_class"].isin(selected_flood_hazards)]
     if frame.empty:
         st.warning("No schools match the current filters.", icon=":material/filter_alt_off:")
         return
@@ -1001,6 +1000,16 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
         )
 
     with st.container(border=True):
+        st.markdown("#### :material/flood: How flood evidence becomes a policy action")
+        st.caption("This is a separate decision layer in Extreme rainfall; it does not replace the established PMIU-based rainfall priority.")
+        render_table(pd.DataFrame([
+            ["Confirmed high flood hazard", "High rainfall exposure and Sentinel-1 flood evidence at or above the live 67th percentile among schools with observed flood signal", "Immediate protection when PMIU capacity is Weak or Partial; resilience investment when capacity is Adequate."],
+            ["Evidence disagreement", "High rainfall with limited satellite flood evidence, or repeated satellite flood evidence with lower rainfall exposure", "Field verification: assess drainage, river/canal exposure, imagery timing, and local conditions."],
+            ["Lower flood evidence", "Neither signal is elevated", "Monitor and maintain."],
+        ], columns=["Evidence state", "Rule", "Policy action"]), column_widths={"Evidence state": "medium", "Policy action": "medium"})
+        st.caption("SFHI hazard class and policy-action filters are in the sidebar. Enrolment shows the potential scale of impact; it does not change the action category.")
+
+    with st.container(border=True):
         st.markdown("#### :material/account_tree: How heatwave priorities are set")
         st.caption("Priority is calculated from the full cumulative school dataset before dashboard filters are applied.")
         exposure_step, capacity_step = st.columns([1, 1.4], gap="large")
@@ -1212,10 +1221,22 @@ levels = select_values(
     "School level", pd.concat([cumulative["school_level"], rainfall_cumulative["school_level"]], ignore_index=True), "level",
 )
 show_detail = st.sidebar.toggle("Show technical detail", value=False, key="show_detail", help="Reveals raw priority codes, driver columns, full data tables and CSV downloads.")
+flood_hazard_filter: list[str] = []
+flood_action_filter: list[str] = []
+if rainfall_cumulative["hazard_class"].notna().any():
+    st.sidebar.subheader(":material/flood: Flood filters")
+    flood_hazard_counts = rainfall_cumulative["hazard_class"].value_counts()
+    flood_hazard_filter = st.sidebar.pills("SFHI hazard class", RAIN_CONFIG["flood_hazard_options"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_hazard_counts.get(x, 0):,})", key="sidebar_flood_hazard")
+    flood_action_counts = rainfall_cumulative["flood_policy_action"].value_counts()
+    flood_action_filter = st.sidebar.pills("Policy action", ["Immediate protection", "Field verification", "Resilience investment", "Monitor and maintain"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_action_counts.get(x, 0):,})", key="sidebar_flood_action")
 st.sidebar.caption("Filters apply everywhere.")
 
 cum = apply_filters(cumulative, districts, levels)
 rain_cap = apply_filters(rainfall_cumulative, districts, levels)
+if flood_hazard_filter:
+    rain_cap = rain_cap[rain_cap["hazard_class"].isin(flood_hazard_filter)]
+if flood_action_filter:
+    rain_cap = rain_cap[rain_cap["flood_policy_action"].isin(flood_action_filter)]
 combined = apply_filters(build_combined(cumulative, rainfall_cumulative), districts, levels)
 
 if section == SECTIONS[0]:
