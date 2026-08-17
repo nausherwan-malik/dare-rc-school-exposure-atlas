@@ -599,7 +599,7 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
     st.caption(cfg["intro"])
     if show_detail and cfg.get("flood_hazard_note"):
         st.caption(cfg["flood_hazard_note"])
-    if cfg["flood_hazard_options"]:
+    if cfg["flood_hazard_options"] and frame["hazard_class"].notna().any():
         flood_counts = frame["hazard_class"].value_counts()
         selected_flood_hazards = st.pills(
             "Flood hazard priority (SFHI)", cfg["flood_hazard_options"], selection_mode="multi",
