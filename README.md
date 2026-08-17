@@ -33,7 +33,7 @@ Every table has a download button (when technical detail is on) so filtered resu
 | --- | --- | --- |
 | `final_school_heatwave_vulnerability_nearest_event.csv` | ~52,053 | One cumulative row per heatwave-exposed school, 2021–2026, with vulnerability priority. Loaded eagerly. |
 | `final_school_rainfall_vulnerability_nearest_event.csv` | ~51,320 | One cumulative row per rainfall-exposed school, with a PMIU-visit-based coping-capacity priority. Loaded eagerly. |
-| `rainfall-data/OneDrive_1_17-08-2026/School_Flood_Hazard_Index.csv` | 88,850 | Local School Flood Hazard Index source. The app corrects its 9-digit school ID, joins it to the rainfall/PMIU file by EMIS, and derives a separate flood-vulnerability priority for the matched schools. |
+| `rainfall-data/OneDrive_1_17-08-2026/School_Flood_Hazard_Index.csv` | 88,850 | School Flood Hazard Index source. The app corrects its 9-digit school ID and joins its SFHI fields to the rainfall/PMIU file by EMIS for filtering, review, and download; it does not change the established rainfall priority. |
 | `punjab_rainfall_event_summary.csv`, `punjab_rainfall_event_disaggregation.csv` | 46 / ~13,000 | Event-level and event×group rainfall roll-ups, used by the 46-event timeline. Loaded only when that panel is opened. |
 | `school_year_heatwave_capacity.csv` | ~380,000 | One row per school × heatwave year, using the PMIU visit closest to that year's heatwave. Loaded lazily — only when the Heat section's "Year-by-year detail" expander is opened, or a school is looked up. |
 | `school_year_rainfall_capacity.csv` | ~208,000 | One row per school × rainfall-exposure year, using the PMIU visit closest to that year's event. Same lazy-load rule as above. |
@@ -74,16 +74,9 @@ Priority combines exposure class (Low/Moderate/High) with the four-dimension cop
 - Priority is computed only for exposed schools, not the full ~52,000-school Punjab population the docx specifies.
 - `rural_urban` is not available in either source file.
 
-### Flood vulnerability (SFHI + PMIU)
+### Flood hazard (SFHI)
 
-The app also derives a separate flood-vulnerability priority for the 51,320 SFHI schools that match the rainfall/PMIU file by corrected 8-digit EMIS code. The SFHI source itself covers 88,850 schools; unmatched schools are not assigned a vulnerability priority because no compatible PMIU capacity record is available in the current dashboard dataset.
-
-1. **Flood hazard** — SFHI is the equal-weight mean of normalized CHIRP/CHIRPS extreme-rainfall exposure and normalized Sentinel-1 flood frequency. Its source classes map to the dashboard exposure classes as: Very High/High → High; Moderate → Moderate; Low/Very Low → Low.
-2. **Capacity** — the same nearest-event PMIU structural condition, learning-space continuity, sanitation, and safe-water classifications used for rainfall. Drainage/sewerage remains excluded because the available PMIU fields are free text with insufficient coverage.
-3. **Priority** — the same exposure × capacity table as rainfall: High + Weak/Partial/Adequate gives Priority 1/2/3; Moderate/Low + Weak/Partial gives Priority 4; Moderate/Low + Adequate gives Priority 5. Missing SFHI or capacity is Unclassified, never low risk.
-4. **Ranking** — within a flood-priority category, schools rank by higher SFHI, then higher PMIU enrolment, then EMIS code. Enrolment describes potential scale of impact; it does not change the priority category.
-
-The Extreme rainfall section offers both the established extreme-rainfall priority and the separate flood-vulnerability priority. Its SFHI class filter applies to the map, charts, shortlist, technical table, and download. These priorities support transparent screening and targeting, not causal estimates of flood damage.
+The School Flood Hazard Index source covers 88,850 schools. The app joins its fields to the 51,320 schools in the current rainfall/PMIU file by corrected 8-digit EMIS code. SFHI is the equal-weight mean of normalized CHIRP/CHIRPS extreme-rainfall exposure and normalized Sentinel-1 flood frequency. Its Very Low to Very High hazard classes filter the rainfall map, charts, shortlist, technical table, and download. SFHI is a hazard measure and does not change the established PMIU-based rainfall vulnerability priority.
 
 ### Where the risk is (combined hazards)
 
