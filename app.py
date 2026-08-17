@@ -637,6 +637,19 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
     st.caption(cfg["intro"])
     if show_detail and cfg.get("flood_hazard_note"):
         st.caption(cfg["flood_hazard_note"])
+    if cfg["flood_policy_panel"] and frame["hazard_class"].notna().any():
+        with st.container(border=True):
+            st.markdown("#### :material/flood: Flood filters")
+            st.caption("Apply flood-hazard and policy-action filters together to every rainfall result below.")
+            flood_hazard_counts = frame["hazard_class"].value_counts()
+            flood_action_counts = frame["flood_policy_action"].value_counts()
+            with st.container(horizontal=True):
+                flood_hazard_filter = st.pills("SFHI hazard class", cfg["flood_hazard_options"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_hazard_counts.get(x, 0):,})", key=f"{cfg['key']}_flood_hazard")
+                flood_action_filter = st.pills("Policy action", ["Immediate protection", "Field verification", "Resilience investment", "Monitor and maintain"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_action_counts.get(x, 0):,})", key=f"{cfg['key']}_flood_action")
+            if flood_hazard_filter:
+                frame = frame[frame["hazard_class"].isin(flood_hazard_filter)]
+            if flood_action_filter:
+                frame = frame[frame["flood_policy_action"].isin(flood_action_filter)]
     if frame.empty:
         st.warning("No schools match the current filters.", icon=":material/filter_alt_off:")
         return
@@ -1221,22 +1234,10 @@ levels = select_values(
     "School level", pd.concat([cumulative["school_level"], rainfall_cumulative["school_level"]], ignore_index=True), "level",
 )
 show_detail = st.sidebar.toggle("Show technical detail", value=False, key="show_detail", help="Reveals raw priority codes, driver columns, full data tables and CSV downloads.")
-flood_hazard_filter: list[str] = []
-flood_action_filter: list[str] = []
-if rainfall_cumulative["hazard_class"].notna().any():
-    st.sidebar.subheader(":material/flood: Flood filters")
-    flood_hazard_counts = rainfall_cumulative["hazard_class"].value_counts()
-    flood_hazard_filter = st.sidebar.pills("SFHI hazard class", RAIN_CONFIG["flood_hazard_options"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_hazard_counts.get(x, 0):,})", key="sidebar_flood_hazard")
-    flood_action_counts = rainfall_cumulative["flood_policy_action"].value_counts()
-    flood_action_filter = st.sidebar.pills("Policy action", ["Immediate protection", "Field verification", "Resilience investment", "Monitor and maintain"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_action_counts.get(x, 0):,})", key="sidebar_flood_action")
 st.sidebar.caption("Filters apply everywhere.")
 
 cum = apply_filters(cumulative, districts, levels)
 rain_cap = apply_filters(rainfall_cumulative, districts, levels)
-if flood_hazard_filter:
-    rain_cap = rain_cap[rain_cap["hazard_class"].isin(flood_hazard_filter)]
-if flood_action_filter:
-    rain_cap = rain_cap[rain_cap["flood_policy_action"].isin(flood_action_filter)]
 combined = apply_filters(build_combined(cumulative, rainfall_cumulative), districts, levels)
 
 if section == SECTIONS[0]:
