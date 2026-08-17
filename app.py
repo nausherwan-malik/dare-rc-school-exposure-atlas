@@ -208,7 +208,7 @@ def load_rainfall_events() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @st.cache_data(show_spinner="Loading rainfall coping-capacity data…")
-def load_rainfall_cumulative() -> pd.DataFrame:
+def load_rainfall_cumulative(flood_data_version: int | None) -> pd.DataFrame:
     rainfall = pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
     if not FLOOD_HAZARD_FILE.exists():
         return rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]})
@@ -1159,7 +1159,9 @@ if any(not file.exists() for file in REQUIRED_FILES):
     st.stop()
 
 cumulative = load_cumulative()
-rainfall_cumulative = load_rainfall_cumulative()
+rainfall_cumulative = load_rainfall_cumulative(
+    FLOOD_HAZARD_FILE.stat().st_mtime_ns if FLOOD_HAZARD_FILE.exists() else None
+)
 
 st.title(":material/public: Punjab school climate risk")
 st.caption("How heatwaves and extreme rainfall affect government schools in Punjab, 2021 onward — and which schools need attention.")
