@@ -50,6 +50,15 @@ PRIORITY_MAP_COLORS = {
     "Priority 4": [45, 125, 210, 100],
     "Priority 5": [87, 125, 155, 55],
 }
+FLOOD_HAZARD_OPTIONS = ["Very High", "High", "Moderate", "Low", "Very Low"]
+FLOOD_HAZARD_LABELS = {value: value for value in FLOOD_HAZARD_OPTIONS}
+FLOOD_HAZARD_COLORS = {
+    "Very High": [153, 27, 27, 210], "High": [220, 72, 39, 190],
+    "Moderate": [245, 158, 11, 140], "Low": [45, 125, 210, 100],
+    "Very Low": [87, 125, 155, 60],
+}
+FLOOD_EXPOSURE_CLASS = {"Very High": "High", "High": "High", "Moderate": "Moderate", "Low": "Low", "Very Low": "Low"}
+EXPOSURE_ORDER = {"Low": 1, "Moderate": 2, "High": 3}
 PLAIN_PRIORITY = {
     "Priority 1": ("🔴", "Urgent", "Facing frequent extreme weather and the school's water, power, toilets or building condition are weak."),
     "Priority 2": ("🟠", "High concern", "Facing frequent extreme weather and coping capacity has real gaps."),
@@ -211,36 +220,41 @@ def load_rainfall_events() -> tuple[pd.DataFrame, pd.DataFrame]:
 def load_rainfall_cumulative(flood_data_version: int | None) -> pd.DataFrame:
     rainfall = pd.read_csv(RAINFALL_CUMULATIVE_FILE, dtype={"emis_code": "string"}, parse_dates=["monitoring_date_used"])
     if not FLOOD_HAZARD_FILE.exists():
-        return add_flood_policy(rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]}))
+        merged = rainfall.assign(**{column: pd.NA for column in ["flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]})
+        return apply_rainfall_flood_priority(merged)
     flood = pd.read_csv(FLOOD_HAZARD_FILE, dtype={"school_id": "string"})
     flood["emis_code"] = flood["school_id"].str.slice(1)
     flood = flood.rename(columns={"school_id": "flood_source_emis"})
-    return add_flood_policy(rainfall.merge(
+    merged = rainfall.merge(
         flood[["emis_code", "flood_source_emis", "s1_flood_frequency", "rainfall_norm", "s1_norm", "sfhi", "sfhi_100", "hazard_class"]],
         on="emis_code", how="left", validate="one_to_one",
-    ))
+    )
+    return apply_rainfall_flood_priority(merged)
 
 
-def add_flood_policy(frame: pd.DataFrame) -> pd.DataFrame:
+def apply_rainfall_flood_priority(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
-    result["flood_evidence"] = pd.NA
-    result["flood_policy_action"] = pd.NA
-    signal = result["s1_norm"].dropna()
-    observed = signal[signal.gt(0)]
-    if observed.empty:
-        return result
-    threshold = observed.quantile(0.67)
-    high_rain = result["exposure_class"].eq("High")
-    repeated_flood = result["s1_norm"].ge(threshold)
-    result["flood_evidence"] = "Lower flood evidence"
-    result.loc[high_rain & repeated_flood, "flood_evidence"] = "Confirmed high flood hazard"
-    result.loc[high_rain & ~repeated_flood, "flood_evidence"] = "High rainfall, unconfirmed inundation"
-    result.loc[~high_rain & repeated_flood, "flood_evidence"] = "Observed flooding, lower rainfall signal"
-    result["flood_policy_action"] = "Monitor and maintain"
-    result.loc[result["flood_evidence"].eq("Confirmed high flood hazard") & result["rainfall_coping_capacity"].isin(["Weak", "Partial"]), "flood_policy_action"] = "Immediate protection"
-    result.loc[result["flood_evidence"].isin(["High rainfall, unconfirmed inundation", "Observed flooding, lower rainfall signal"]), "flood_policy_action"] = "Field verification"
-    result.loc[result["flood_evidence"].eq("Confirmed high flood hazard") & result["rainfall_coping_capacity"].eq("Adequate"), "flood_policy_action"] = "Resilience investment"
-    result["flood_s1_threshold"] = threshold
+    flood_class = result["hazard_class"].map(FLOOD_EXPOSURE_CLASS)
+    rainfall_rank = result["exposure_class"].map(EXPOSURE_ORDER)
+    flood_rank = flood_class.map(EXPOSURE_ORDER)
+    result["priority_exposure_class"] = result["exposure_class"].where(
+        flood_rank.isna() | flood_rank.le(rainfall_rank), flood_class
+    )
+    capacity = result["rainfall_coping_capacity"]
+    high = result["priority_exposure_class"].eq("High")
+    lower = result["priority_exposure_class"].isin(["Low", "Moderate"])
+    result["vulnerability_priority"] = "Unclassified - capacity data missing"
+    result.loc[high & capacity.eq("Weak"), "vulnerability_priority"] = "Priority 1"
+    result.loc[high & capacity.eq("Partial"), "vulnerability_priority"] = "Priority 2"
+    result.loc[high & capacity.eq("Adequate"), "vulnerability_priority"] = "Priority 3"
+    result.loc[lower & capacity.isin(["Weak", "Partial"]), "vulnerability_priority"] = "Priority 4"
+    result.loc[lower & capacity.eq("Adequate"), "vulnerability_priority"] = "Priority 5"
+    result["priority_rank"] = (
+        result.assign(_priority_number=priority_number(result["vulnerability_priority"]))
+        .sort_values(["_priority_number", "sfhi_100", "rainfall_exposure_score", "total_enrolment"], ascending=[True, False, False, False], na_position="last")
+        .groupby("vulnerability_priority", dropna=False).cumcount().add(1)
+        .reindex(result.index)
+    )
     return result
 
 
@@ -380,6 +394,15 @@ def rain_capacity_rules(base_frame: pd.DataFrame) -> pd.DataFrame:
     ], columns=["Dimension", "Proxy", "PMIU coverage", "Rule"])
 
 
+def rain_flood_exposure_rules(base_frame: pd.DataFrame) -> pd.DataFrame:
+    flood_coverage = base_frame["hazard_class"].notna().mean() * 100
+    signal_coverage = base_frame["s1_flood_frequency"].notna().mean() * 100
+    return pd.DataFrame([
+        ["Flood hazard class", "School Flood Hazard Index (SFHI)", f"{flood_coverage:.1f}%", "Very Low to Very High; equal-weight normalized rainfall and Sentinel-1 flood evidence."],
+        ["Satellite flood evidence", "Sentinel-1 flood frequency", f"{signal_coverage:.1f}%", "Supporting inundation signal; it complements rainfall exposure and does not replace it."],
+    ], columns=["Exposure signal", "Measure", "Coverage", "Rule"])
+
+
 _COLUMN_WIDTH_CSS = {"small": "14%", "medium": "20%", "large": "30%"}
 
 
@@ -406,21 +429,30 @@ def render_table(df: pd.DataFrame, column_widths: dict | None = None) -> None:
     )
 
 
-def render_flood_policy_panel(frame: pd.DataFrame) -> None:
-    if frame["s1_norm"].notna().sum() == 0:
+def render_flood_evidence_panel(frame: pd.DataFrame) -> None:
+    flood = frame.dropna(subset=["hazard_class"])
+    if flood.empty:
         st.caption("Flood evidence will appear when the SFHI source file is available.")
         return
-    policy = frame
-    st.caption("Confirmed hazard combines high rainfall exposure with repeated satellite flood evidence. Where the two signals disagree, the action is field verification. PMIU capacity then distinguishes immediate protection from longer-term resilience investment.")
+    st.caption("The School Flood Hazard Index (SFHI) combines normalized extreme-rainfall exposure and Sentinel-1 satellite flood evidence. Its mapped exposure class contributes to rainfall priority; use this view to inspect the underlying flood signal.")
     with st.container(horizontal=True):
-        st.metric("Immediate protection", f"{(policy['flood_policy_action'] == 'Immediate protection').sum():,}", border=True)
-        st.metric("Field verification", f"{(policy['flood_policy_action'] == 'Field verification').sum():,}", border=True)
-        st.metric("Resilience investment", f"{(policy['flood_policy_action'] == 'Resilience investment').sum():,}", border=True)
-    colors = {"Immediate protection": [153, 27, 27, 210], "Field verification": [245, 158, 11, 170], "Resilience investment": [45, 125, 210, 150], "Monitor and maintain": [87, 125, 155, 70]}
-    points = prepare_map_points(policy, "flood_policy_action", colors, ["school_name", "district", "flood_evidence", "flood_policy_action", "sfhi_100", "rainfall_coping_capacity"])
-    st.pydeck_chart(hazard_map(points, "flood_policy_map", "<b>{school_name}</b><br/>{district}<br/>{flood_policy_action}<br/>{flood_evidence}<br/>SFHI: {sfhi_100}<br/>Capacity: {rainfall_coping_capacity}"), height=420, key="flood_policy_map")
-    st.caption(f"Repeated Sentinel-1 flood evidence means at or above the current 67th percentile among schools with observed flood signal ({policy['flood_s1_threshold'].dropna().iloc[0]:.3f}). Evidence disagreement is a field-verification flag, not a lower-risk judgement.")
-    st.dataframe(policy.sort_values(["flood_policy_action", "sfhi_100", "total_enrolment"], ascending=[True, False, False])[['school_name', 'district', 'tehsil', 'flood_evidence', 'flood_policy_action', 'sfhi_100', 'total_enrolment', 'rainfall_coping_capacity']], hide_index=True, height=360, column_config={"sfhi_100": st.column_config.NumberColumn("SFHI (0–100)", format="%.1f"), "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f"), "rainfall_coping_capacity": "PMIU capacity"})
+        st.metric("Schools with flood evidence", f"{len(flood):,}", border=True)
+        st.metric("High or very high hazard", f"{flood['hazard_class'].isin(['High', 'Very High']).sum():,}", border=True)
+        st.metric("Satellite flood signal", f"{flood['s1_flood_frequency'].gt(0).sum():,}", border=True)
+        st.metric("Students at high-hazard schools", f"{flood.loc[flood['hazard_class'].isin(['High', 'Very High']), 'total_enrolment'].sum():,.0f}", border=True)
+    counts = flood["hazard_class"].value_counts()
+    selected = legend_pills(FLOOD_HAZARD_OPTIONS, FLOOD_HAZARD_LABELS, counts, "rain_flood_hazard_pills")
+    map_schools = flood[flood["hazard_class"].isin(selected)] if selected else flood
+    points = prepare_map_points(map_schools, "hazard_class", FLOOD_HAZARD_COLORS, ["school_name", "district", "hazard_class", "sfhi_100", "s1_flood_frequency", "vulnerability_priority"])
+    st.pydeck_chart(hazard_map(points, "rain_flood_evidence", "<b>{school_name}</b><br/>{district}<br/>Flood hazard: {hazard_class}<br/>SFHI: {sfhi_100}<br/>Satellite flood frequency: {s1_flood_frequency}<br/>{vulnerability_priority}"), height=420, key="rain_flood_evidence_map")
+    st.caption(f"Showing {len(map_schools):,} schools. Flood hazard is part of rainfall exposure; PMIU coping capacity remains the separate capacity component.")
+    st.dataframe(
+        flood.sort_values(["sfhi_100", "total_enrolment"], ascending=False)[["school_name", "district", "tehsil", "hazard_class", "sfhi_100", "s1_flood_frequency", "total_enrolment", "vulnerability_priority"]].head(100),
+        hide_index=True, height=360,
+        column_config={"hazard_class": "Flood hazard", "sfhi_100": st.column_config.NumberColumn("SFHI (0–100)", format="%.1f"), "s1_flood_frequency": st.column_config.NumberColumn("Satellite flood frequency", format="%.3f"), "total_enrolment": st.column_config.NumberColumn("Enrolment", format="%.0f")},
+    )
+
+
 def legend_pills(options: list[str], labels: dict, counts: pd.Series, key: str, plain: bool = False) -> list[str]:
     """A clickable, multi-select map legend with live counts — used for every map in the app."""
     def fmt(option: str) -> str:
@@ -637,24 +669,11 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
     st.caption(cfg["intro"])
     if show_detail and cfg.get("flood_hazard_note"):
         st.caption(cfg["flood_hazard_note"])
-    if cfg["flood_policy_panel"] and frame["hazard_class"].notna().any():
-        with st.container(border=True):
-            st.markdown("#### :material/flood: Flood filters")
-            st.caption("Apply flood-hazard and policy-action filters together to every rainfall result below.")
-            flood_hazard_counts = frame["hazard_class"].value_counts()
-            flood_action_counts = frame["flood_policy_action"].value_counts()
-            with st.container(horizontal=True):
-                flood_hazard_filter = st.pills("SFHI hazard class", cfg["flood_hazard_options"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_hazard_counts.get(x, 0):,})", key=f"{cfg['key']}_flood_hazard")
-                flood_action_filter = st.pills("Policy action", ["Immediate protection", "Field verification", "Resilience investment", "Monitor and maintain"], selection_mode="multi", format_func=lambda x: f"{x} ({flood_action_counts.get(x, 0):,})", key=f"{cfg['key']}_flood_action")
-            if flood_hazard_filter:
-                frame = frame[frame["hazard_class"].isin(flood_hazard_filter)]
-            if flood_action_filter:
-                frame = frame[frame["flood_policy_action"].isin(flood_action_filter)]
     if frame.empty:
         st.warning("No schools match the current filters.", icon=":material/filter_alt_off:")
         return
 
-    high = (frame["exposure_class"] == "High").sum()
+    high = (frame[cfg.get("high_exposure_column", "exposure_class")] == "High").sum()
     urgent = frame["vulnerability_priority"].isin(["Priority 1", "Priority 2"]).sum()
     no_visit = (frame["monitoring_visit_status"] != cfg["visit_selected_status"]).sum()
     with st.container(horizontal=True):
@@ -669,6 +688,9 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
         with exposure_col:
             st.markdown(f"**{cfg['exposure_amount_label']}**")
             render_table(exposure_rule_table(base_frame, cfg["exposure_class_column"]))
+            if cfg.get("exposure_detail_fn"):
+                st.markdown("**Flooding evidence within rainfall exposure**")
+                render_table(cfg["exposure_detail_fn"](base_frame), column_widths={"Exposure signal": "medium"})
         with capacity_col:
             st.markdown(f"**{cfg['capacity_label']}**")
             render_table(cfg["capacity_rules_fn"](base_frame), column_widths={"Dimension": "medium"})
@@ -734,9 +756,9 @@ def render_hazard_section(cfg: dict, base_frame: pd.DataFrame, frame: pd.DataFra
     if cfg.get("extra_panel"):
         with st.expander(cfg["extra_panel_label"]):
             cfg["extra_panel"](districts, levels)
-    if cfg["flood_policy_panel"]:
-        with st.expander(":material/flood: Flood evidence and policy actions"):
-            render_flood_policy_panel(frame)
+    if cfg["flood_evidence_panel"]:
+        with st.expander(":material/flood: Flood hazard evidence"):
+            render_flood_evidence_panel(frame)
 
 
 def render_year_detail(cfg: dict, districts: list[str], levels: list[str]) -> None:
@@ -1013,14 +1035,14 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
         )
 
     with st.container(border=True):
-        st.markdown("#### :material/flood: How flood evidence becomes a policy action")
-        st.caption("This is a separate decision layer in Extreme rainfall; it does not replace the established PMIU-based rainfall priority.")
+        st.markdown("#### :material/flood: How flood evidence complements rainfall exposure")
+        st.caption("Flood evidence is a supporting hazard layer in Extreme rainfall; it does not replace the documented exposure × capacity priority.")
         render_table(pd.DataFrame([
-            ["Confirmed high flood hazard", "High rainfall exposure and Sentinel-1 flood evidence at or above the live 67th percentile among schools with observed flood signal", "Immediate protection when PMIU capacity is Weak or Partial; resilience investment when capacity is Adequate."],
-            ["Evidence disagreement", "High rainfall with limited satellite flood evidence, or repeated satellite flood evidence with lower rainfall exposure", "Field verification: assess drainage, river/canal exposure, imagery timing, and local conditions."],
-            ["Lower flood evidence", "Neither signal is elevated", "Monitor and maintain."],
-        ], columns=["Evidence state", "Rule", "Policy action"]), column_widths={"Evidence state": "medium", "Policy action": "medium"})
-        st.caption("SFHI hazard class and policy-action filters are in the sidebar. Enrolment shows the potential scale of impact; it does not change the action category.")
+            ["Extreme-rainfall exposure", "46 localized events detected from rainfall data", "Defines how often, how intensely and for how long each school was exposed."],
+            ["Sentinel-1 flood evidence", "Satellite-observed flood frequency", "Checks whether inundation was observed near the school."],
+            ["School Flood Hazard Index", "Equal-weight combination of normalized rainfall exposure and satellite flood evidence", "Provides a Very Low to Very High supporting hazard class."],
+        ], columns=["Layer", "Measure", "Role"]), column_widths={"Layer": "medium", "Role": "large"})
+        st.caption("Enrolment shows the potential scale of exposure; it does not change either the flood-hazard class or rainfall priority.")
 
     with st.container(border=True):
         st.markdown("#### :material/account_tree: How heatwave priorities are set")
@@ -1064,8 +1086,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
     with st.container(border=True):
         st.markdown("#### :material/water_drop: How rainfall priorities are set")
         st.caption(
-            "Rainfall priority follows the same two-step exposure-then-capacity logic as heatwave, using four "
-            "coping-capacity proxies recorded at PMIU visits. Only exposed schools (events_exposed_count > 0) receive a priority."
+            "Rainfall priority follows the heatwave exposure-then-capacity logic, but its exposure class takes the more severe of the rainfall score and the SFHI flood-hazard class. Only exposed schools receive a priority."
         )
         rain_exposure_step, rain_capacity_step = st.columns([1, 1.6], gap="large")
         with rain_exposure_step:
@@ -1073,6 +1094,8 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
             st.markdown("**Cumulative rainfall exposure**")
             st.caption("Composite of event frequency, intensity and persistence — see the Extreme rainfall section.")
             render_table(exposure_rule_table(rainfall_cumulative, "rainfall_exposure_score"))
+            st.markdown("**Flooding is part of the priority exposure class**")
+            render_table(rain_flood_exposure_rules(rainfall_cumulative), column_widths={"Exposure signal": "medium"})
         with rain_capacity_step:
             st.badge("Step 2 · Coping capacity", icon=":material/handyman:", color="orange")
             st.markdown("**Four PMIU-visit proxies, scored at the visit closest to one of the school's exposed rainfall years**")
@@ -1080,7 +1103,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
             st.caption("Each of the four scored dimensions contributes Adequate = 2, Partial = 1, Weak = 0 to a 0–8 capacity score.")
         rain_priority_counts = rainfall_cumulative["vulnerability_priority"].value_counts()
         st.badge("Step 3 · Priority", icon=":material/priority_high:", color="red")
-        st.markdown("**Combine exposure and coping capacity**")
+        st.markdown("**Combine flood-adjusted exposure and coping capacity**")
         render_table(
             pd.DataFrame([
                 [PRIORITY_LABELS["Priority 1"], "High", "Weak", f"{int(rain_priority_counts.get('Priority 1', 0)):,}"],
@@ -1093,7 +1116,7 @@ def render_method(cumulative: pd.DataFrame, rainfall_cumulative: pd.DataFrame) -
             column_widths={"Priority": "medium"},
         )
         st.info(
-            "Priority rank orders schools within each category by rainfall exposure score, then EMIS code. It supports "
+            "Flood hazard maps to Low (Very Low/Low), Moderate (Moderate), or High (High/Very High). The priority exposure class is the more severe of that class and the rainfall exposure class. Priority rank then orders schools by SFHI, rainfall exposure score and enrolment. It supports "
             "review and targeting, not a causal estimate. Schools never exposed to an extreme-rainfall event are excluded "
             "from priority, not scored as low-risk.",
             icon=":material/info:",
@@ -1141,9 +1164,9 @@ HEAT_CONFIG = {
     "yearly_download_prefix": "filtered_school_year_heatwave_capacity",
     "extra_panel": None,
     "flood_hazard_note": None,
-    "flood_hazard_options": None,
     "flood_hazard_caption": None,
-    "flood_policy_panel": False,
+    "exposure_detail_fn": None,
+    "flood_evidence_panel": False,
 }
 
 RAIN_CONFIG = {
@@ -1163,23 +1186,28 @@ RAIN_CONFIG = {
     "priority_options": RAINFALL_PRIORITY_OPTIONS,
     "priority_labels": RAINFALL_PRIORITY_LABELS,
     "unclassified_label": "Unclassified - capacity data missing",
-    "tooltip_fields": ["school_name", "district", "vulnerability_priority", "exposure_class", "rainfall_coping_capacity"],
-    "tooltip_html": "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>Exposure: {exposure_class} · Capacity: {rainfall_coping_capacity}",
-    "shortlist_columns": ["priority_rank", "school_name", "district", "tehsil", "exposure_class", "rainfall_coping_capacity", "cumulative_extreme_days", "monitoring_date_used", "monitoring_visit_status"],
+    "high_exposure_column": "priority_exposure_class",
+    "tooltip_fields": ["school_name", "district", "vulnerability_priority", "exposure_class", "priority_exposure_class", "rainfall_coping_capacity", "hazard_class", "sfhi_100"],
+    "tooltip_html": "<b>{school_name}</b><br/>{district}<br/>{vulnerability_priority}<br/>Rainfall exposure: {exposure_class}<br/>Flood-adjusted exposure: {priority_exposure_class}<br/>Capacity: {rainfall_coping_capacity}<br/>Flood hazard: {hazard_class} · SFHI: {sfhi_100}",
+    "shortlist_columns": ["priority_rank", "school_name", "district", "tehsil", "exposure_class", "priority_exposure_class", "rainfall_coping_capacity", "hazard_class", "sfhi_100", "cumulative_extreme_days", "monitoring_date_used", "monitoring_visit_status"],
     "shortlist_column_config": {
         "priority_rank": st.column_config.NumberColumn("Priority rank", format="%d"),
         "cumulative_extreme_days": st.column_config.NumberColumn("Extreme-rainfall days", format="%.0f"),
         "monitoring_date_used": st.column_config.DateColumn("Selected visit date", format="DD MMM YYYY"),
         "monitoring_visit_status": "Monitoring status",
         "rainfall_coping_capacity": "Coping capacity",
+        "priority_exposure_class": "Flood-adjusted exposure",
+        "hazard_class": "Flood hazard",
+        "sfhi_100": st.column_config.NumberColumn("SFHI (0–100)", format="%.1f"),
     },
-    "full_table_columns": ["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "sfhi_100", "hazard_class", "s1_flood_frequency", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class", "total_enrolment", "classrooms_used_for_teaching", "functional_toilets", "building_cleanliness", "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status", "rainfall_coping_capacity", "vulnerability_priority", "data_quality_flag"],
+    "full_table_columns": ["emis_code", "school_name", "district", "tehsil", "school_level", "school_gender", "sfhi_100", "hazard_class", "s1_flood_frequency", "events_exposed_count", "event_exposure_frequency_percent", "cumulative_extreme_days", "maximum_daily_rainfall_mm", "maximum_3day_rainfall_mm", "rainfall_exposure_score", "exposure_class", "priority_exposure_class", "total_enrolment", "classrooms_used_for_teaching", "functional_toilets", "building_cleanliness", "structural_condition_status", "learning_space_status", "sanitation_status", "safe_water_status", "rainfall_coping_capacity", "vulnerability_priority", "data_quality_flag"],
     "full_table_column_config": {
         "sfhi_100": st.column_config.NumberColumn("School Flood Hazard Index (0–100)", format="%.1f"),
         "hazard_class": "Flood hazard class",
         "s1_flood_frequency": st.column_config.NumberColumn("Sentinel-1 flood frequency", format="%.3f"),
         "event_exposure_frequency_percent": st.column_config.NumberColumn("Event exposure", format="%.1f%%"),
-        "rainfall_exposure_score": st.column_config.NumberColumn("Exposure score", format="%.1f"),
+        "rainfall_exposure_score": st.column_config.NumberColumn("Rainfall exposure score", format="%.1f"),
+        "priority_exposure_class": "Flood-adjusted exposure class",
         "maximum_daily_rainfall_mm": st.column_config.NumberColumn("Maximum daily rainfall (mm)", format="%.1f"),
         "maximum_3day_rainfall_mm": st.column_config.NumberColumn("Maximum 3-day rainfall (mm)", format="%.1f"),
         "rainfall_coping_capacity": "Coping capacity",
@@ -1199,10 +1227,10 @@ RAIN_CONFIG = {
     "yearly_download_prefix": "filtered_school_year_rainfall_capacity",
     "extra_panel": render_rainfall_event_timeline,
     "extra_panel_label": ":material/history: When extreme-rainfall events affected schools (46-event timeline)",
-    "flood_hazard_note": "The School Flood Hazard Index is joined to the nearest-event PMIU indicators by corrected EMIS code. It combines equally weighted, 0–1-normalized CHIRP rainfall exposure and Sentinel-1 flood evidence; it is available for review and download, but does not change the existing rainfall priority.",
-    "flood_hazard_options": ["Very High", "High", "Moderate", "Low", "Very Low"],
-    "flood_hazard_caption": "SFHI flood-hazard class combines CHIRP rainfall exposure and Sentinel-1 flood evidence with equal weight. It filters the map, charts, shortlist, technical table and download below; it does not replace the PMIU-based rainfall vulnerability priority.",
-    "flood_policy_panel": True,
+    "flood_hazard_note": "The School Flood Hazard Index is joined by corrected EMIS code. It combines equally weighted, 0–1-normalized rainfall exposure and Sentinel-1 flood evidence; its mapped exposure class now contributes to rainfall priority.",
+    "flood_hazard_caption": "SFHI flood-hazard class combines rainfall exposure and Sentinel-1 flood evidence with equal weight, and contributes to the rainfall priority exposure class.",
+    "exposure_detail_fn": rain_flood_exposure_rules,
+    "flood_evidence_panel": True,
 }
 
 
